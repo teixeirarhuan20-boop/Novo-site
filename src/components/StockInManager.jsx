@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { supabase } from '../lib/supabase';
 
 export function StockInManager({ inventory, setInventory, pessoas, transactions, setTransactions }) {
   // Estado local para armazenar a quantidade e pessoa selecionada para cada item da lista
@@ -29,12 +30,10 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
     const pessoa = pessoas.find(p => p.id === pessoaId);
 
     // Atualiza estoque
+    const newQuantity = type === 'entrada' ? item.quantity + quantity : item.quantity - quantity;
     const updatedInventory = inventory.map(i => {
       if (i.id === item.id) {
-        return { 
-          ...i, 
-          quantity: type === 'entrada' ? i.quantity + quantity : i.quantity - quantity 
-        };
+        return { ...i, quantity: newQuantity };
       }
       return i;
     });
@@ -49,11 +48,21 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
       quantity: quantity,
       unitPrice: item.price,
       totalValue: item.price * quantity,
-      pessoaId: pessoa ? pessoa.id : null,
       personName: pessoa ? pessoa.name : '',
       date: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
     };
     setTransactions([...transactions, newTransaction]);
+
+    // Save to Supabase (Atomic updates)
+    async function syncToSupabase() {
+      const { error: invError } = await supabase.from('inventory').update({ quantity: newQuantity }).eq('id', item.id);
+      const { error: traError } = await supabase.from('transactions').insert([newTransaction]);
+      
+      if (invError || traError) {
+        console.error('Erro ao sincronizar com Supabase:', invError || traError);
+      }
+    }
+    syncToSupabase();
 
     // Limpa os campos daquele item
     setActions(prev => ({

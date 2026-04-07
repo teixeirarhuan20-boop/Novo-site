@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { supabase } from '../lib/supabase';
 
 export function InventoryManager({ inventory, setInventory, transactions = [] }) {
   const [form, setForm] = useState({ name: '', category: '', quantity: '', price: '' });
@@ -25,10 +26,19 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
 
     setInventory([...inventory, newItem]);
     setForm({ name: '', category: '', quantity: '', price: '' });
+    
+    // Save to Supabase
+    supabase.from('inventory').insert([newItem]).then(({ error }) => {
+      if (error) console.error('Erro ao salvar no Supabase:', error);
+    });
   };
 
-  const deleteItem = (id) => {
+  const deleteItem = async (id) => {
     setInventory(inventory.filter(item => item.id !== id));
+    
+    // Delete from Supabase
+    const { error } = await supabase.from('inventory').delete().eq('id', id);
+    if (error) console.error('Erro ao deletar no Supabase:', error);
   };
 
   // Funções de Edição
@@ -41,21 +51,27 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
     setEditingId(null);
   };
 
-  const saveEdit = (id) => {
+  const saveEdit = async (id) => {
+    const updatedItem = {
+      name: editForm.name,
+      category: editForm.category,
+      quantity: Number(editForm.quantity),
+      price: Number(editForm.price)
+    };
+
     const updatedInventory = inventory.map(item => {
       if (item.id === id) {
-        return {
-          ...item,
-          name: editForm.name,
-          category: editForm.category,
-          quantity: Number(editForm.quantity),
-          price: Number(editForm.price)
-        };
+        return { ...item, ...updatedItem };
       }
       return item;
     });
+    
     setInventory(updatedInventory);
     setEditingId(null);
+
+    // Update in Supabase
+    const { error } = await supabase.from('inventory').update(updatedItem).eq('id', id);
+    if (error) console.error('Erro ao atualizar no Supabase:', error);
   };
 
   // Lógica da Curva ABCD

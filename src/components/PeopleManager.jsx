@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { supabase } from '../lib/supabase';
 
 export function PeopleManager({ pessoas, setPessoas }) {
   const [form, setForm] = useState({ name: '', document: '', role: 'fornecedor', contact: '' });
@@ -16,10 +17,19 @@ export function PeopleManager({ pessoas, setPessoas }) {
 
     setPessoas([...pessoas, newPerson]);
     setForm({ name: '', document: '', role: 'fornecedor', contact: '' });
+
+    // Save to Supabase
+    supabase.from('pessoas').insert([newPerson]).then(({ error }) => {
+      if (error) console.error('Erro ao salvar pessoa no Supabase:', error);
+    });
   };
 
-  const deletePerson = (id) => {
+  const deletePerson = async (id) => {
     setPessoas(pessoas.filter(p => p.id !== id));
+
+    // Delete from Supabase
+    const { error } = await supabase.from('pessoas').delete().eq('id', id);
+    if (error) console.error('Erro ao deletar pessoa no Supabase:', error);
   };
 
   return (

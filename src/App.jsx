@@ -8,36 +8,52 @@ import { PeopleManager } from './components/PeopleManager';
 import { HistoryManager } from './components/HistoryManager';
 import { StockInManager } from './components/StockInManager';
 import { sendMessageToGemini } from './gemini';
+import { supabase } from './lib/supabase';
 import './index.css';
 
 function App() {
   const [activeTab, setActiveTab] = useState('estoque'); 
   
-  const [inventory, setInventory] = useState(() => {
-    const saved = localStorage.getItem('companyInventory');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [inventory, setInventory] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [outreachLeads, setOutreachLeads] = useState([]);
+  const [pessoas, setPessoas] = useState([]);
+  const [transactions, setTransactions] = useState([]);
 
-  const [leads, setLeads] = useState(() => {
-    const saved = localStorage.getItem('companyLeads');
-    return saved ? JSON.parse(saved) : [];
-  });
-  
-  // Novo Estado "Nativo" para os leads aguardando mensagem
-  const [outreachLeads, setOutreachLeads] = useState(() => {
-    const saved = localStorage.getItem('companyOutreach');
-    return saved ? JSON.parse(saved) : [];
-  });
+  // Carregar dados do Supabase ao iniciar
+  useEffect(() => {
+    async function fetchData() {
+      // 1. Estoque
+      const { data: inv } = await supabase.from('inventory').select('*');
+      if (inv) setInventory(inv);
 
-  const [pessoas, setPessoas] = useState(() => {
-    const saved = localStorage.getItem('companyPessoas');
-    return saved ? JSON.parse(saved) : [];
-  });
+      // 2. Pessoas
+      const { data: pes } = await supabase.from('pessoas').select('*');
+      if (pes) setPessoas(pes);
 
-  const [transactions, setTransactions] = useState(() => {
-    const saved = localStorage.getItem('companyTransactions');
-    return saved ? JSON.parse(saved) : [];
-  });
+      // 3. Transações
+      const { data: tra } = await supabase.from('transactions').select('*');
+      if (tra) setTransactions(tra);
+
+      // 4. Leads (Opcional, se estiver usando)
+      // const { data: lds } = await supabase.from('leads').select('*');
+      // if (lds) setLeads(lds);
+    }
+    fetchData();
+  }, []);
+
+  // Persistência local (Opcional, mantida como backup rápido)
+  useEffect(() => {
+    localStorage.setItem('companyInventory', JSON.stringify(inventory));
+  }, [inventory]);
+
+  useEffect(() => {
+    localStorage.setItem('companyPessoas', JSON.stringify(pessoas));
+  }, [pessoas]);
+
+  useEffect(() => {
+    localStorage.setItem('companyTransactions', JSON.stringify(transactions));
+  }, [transactions]);
 
   const [messages, setMessages] = useState([
     { role: 'bot', text: 'Olá! Sou sua vendedora. Minha irmã gêmea (A Ana) atende os contatos lá na fila terceira aba!' }
