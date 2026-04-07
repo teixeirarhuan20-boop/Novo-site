@@ -15,7 +15,7 @@ export function PeopleManager({ pessoas, setPessoas }) {
       ...form
     };
 
-    setPessoas([...pessoas, newPerson]);
+    setPessoas(prev => [...prev, newPerson]);
     setForm({ name: '', document: '', role: 'fornecedor', contact: '' });
 
     // Save to Supabase
@@ -25,7 +25,7 @@ export function PeopleManager({ pessoas, setPessoas }) {
   };
 
   const deletePerson = async (id) => {
-    setPessoas(pessoas.filter(p => p.id !== id));
+    setPessoas(prev => prev.filter(p => p.id !== id));
 
     // Delete from Supabase
     const { error } = await supabase.from('pessoas').delete().eq('id', id);

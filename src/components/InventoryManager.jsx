@@ -8,6 +8,11 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({ name: '', category: '', quantity: '', price: '' });
 
+  // Estados para Filtros
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterCategory, setFilterCategory] = useState('');
+  const [sortBy, setSortBy] = useState('name'); // 'name', 'quantity', 'price'
+
   const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
   
   const handleEditChange = (e) => setEditForm({ ...editForm, [e.target.name]: e.target.value });
@@ -24,7 +29,7 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
       price: Number(form.price)
     };
 
-    setInventory([...inventory, newItem]);
+    setInventory(prev => [...prev, newItem]);
     setForm({ name: '', category: '', quantity: '', price: '' });
     
     // Save to Supabase
@@ -34,7 +39,7 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
   };
 
   const deleteItem = async (id) => {
-    setInventory(inventory.filter(item => item.id !== id));
+    setInventory(prev => prev.filter(item => item.id !== id));
     
     // Delete from Supabase
     const { error } = await supabase.from('inventory').delete().eq('id', id);
@@ -59,14 +64,13 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
       price: Number(editForm.price)
     };
 
-    const updatedInventory = inventory.map(item => {
+    setInventory(prev => prev.map(item => {
       if (item.id === id) {
         return { ...item, ...updatedItem };
       }
       return item;
-    });
+    }));
     
-    setInventory(updatedInventory);
     setEditingId(null);
 
     // Update in Supabase
@@ -122,6 +126,22 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
     }
   };
 
+  // Filtragem e Ordenação
+  const categories = [...new Set(inventory.map(item => item.category))];
+
+  const filteredInventory = inventory
+    .filter(item => {
+      const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesCategory = filterCategory === '' || item.category === filterCategory;
+      return matchesSearch && matchesCategory;
+    })
+    .sort((a, b) => {
+      if (sortBy === 'name') return a.name.localeCompare(b.name);
+      if (sortBy === 'quantity') return b.quantity - a.quantity;
+      if (sortBy === 'price') return b.price - a.price;
+      return 0;
+    });
+
   return (
     <div className="inventory-panel">
       <h1>Controle de Estoque</h1>
@@ -146,6 +166,34 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
         <button type="submit" className="primary-btn">Adicionar</button>
       </form>
 
+      {/* Barra de Filtros */}
+      <div className="filters-bar">
+        <div className="filter-group" style={{ flex: 2 }}>
+          <input 
+            type="text" 
+            placeholder="🔍 Pesquisar produto por nome..." 
+            value={searchTerm} 
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="filter-input"
+          />
+        </div>
+        <div className="filter-group">
+          <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="filter-select">
+            <option value="">📂 Todas Categorias</option>
+            {categories.map(cat => (
+              <option key={cat} value={cat}>{cat}</option>
+            ))}
+          </select>
+        </div>
+        <div className="filter-group">
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="filter-select">
+            <option value="name">🔤 Nome (A-Z)</option>
+            <option value="quantity">📊 Maior Estoque</option>
+            <option value="price">💰 Maior Valor</option>
+          </select>
+        </div>
+      </div>
+
       <table>
         <thead>
           <tr>
@@ -158,12 +206,12 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
           </tr>
         </thead>
         <tbody>
-          {inventory.length === 0 ? (
+          {filteredInventory.length === 0 ? (
             <tr>
-              <td colSpan="6" style={{ textAlign: 'center', padding: '2rem', color: '#8e8e8e' }}>Nenhum produto cadastrado no estoque ainda.</td>
+              <td colSpan="6" style={{ textAlign: 'center', padding: '2rem', color: '#8e8e8e' }}>Nenhum produto encontrado com esses filtros.</td>
             </tr>
           ) : (
-            inventory.map((item) => (
+            filteredInventory.map((item) => (
               <tr key={item.id}>
                 {editingId === item.id ? (
                   /* MODO DE EDIÇÃO (Inputs) */

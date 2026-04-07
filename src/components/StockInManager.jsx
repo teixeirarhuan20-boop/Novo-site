@@ -5,6 +5,10 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
   // Estado local para armazenar a quantidade e pessoa selecionada para cada item da lista
   const [actions, setActions] = useState({});
 
+  // Estados para Filtros
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterCategory, setFilterCategory] = useState('');
+
   const handleActionChange = (itemId, field, value) => {
     setActions(prev => ({
       ...prev,
@@ -31,13 +35,12 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
 
     // Atualiza estoque
     const newQuantity = type === 'entrada' ? item.quantity + quantity : item.quantity - quantity;
-    const updatedInventory = inventory.map(i => {
+    setInventory(prev => prev.map(i => {
       if (i.id === item.id) {
         return { ...i, quantity: newQuantity };
       }
       return i;
-    });
-    setInventory(updatedInventory);
+    }));
 
     // Registra transação
     const newTransaction = {
@@ -51,7 +54,7 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
       personName: pessoa ? pessoa.name : '',
       date: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
     };
-    setTransactions([...transactions, newTransaction]);
+    setTransactions(prev => [...prev, newTransaction]);
 
     // Save to Supabase (Atomic updates)
     async function syncToSupabase() {
@@ -81,6 +84,27 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
         Abaixo estão todos os produtos cadastrados. Você pode adicionar (entrada) ou remover (saída) quantidades rapidamente.
       </p>
 
+      {/* Barra de Filtros */}
+      <div className="filters-bar" style={{ marginBottom: '1.5rem' }}>
+        <div className="filter-group" style={{ flex: 1 }}>
+          <input 
+            type="text" 
+            placeholder="🔍 Encontrar produto pelo nome..." 
+            value={searchTerm} 
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="filter-input"
+          />
+        </div>
+        <div className="filter-group" style={{ width: '250px' }}>
+          <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="filter-select">
+            <option value="">📂 Todas Categorias</option>
+            {[...new Set(inventory.map(item => item.category))].map(cat => (
+              <option key={cat} value={cat}>{cat}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
       <table>
         <thead>
           <tr>
@@ -92,12 +116,24 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
           </tr>
         </thead>
         <tbody>
-          {inventory.length === 0 ? (
+          {inventory
+            .filter(item => {
+              const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase());
+              const matchesCategory = filterCategory === '' || item.category === filterCategory;
+              return matchesSearch && matchesCategory;
+            })
+            .length === 0 ? (
             <tr>
-              <td colSpan="5" style={{ textAlign: 'center', padding: '2rem', color: '#8e8e8e' }}>Nenhum produto cadastrado no estoque ainda.</td>
+              <td colSpan="5" style={{ textAlign: 'center', padding: '2rem', color: '#8e8e8e' }}>Nenhum produto encontrado.</td>
             </tr>
           ) : (
-            inventory.map((item) => {
+            inventory
+              .filter(item => {
+                const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase());
+                const matchesCategory = filterCategory === '' || item.category === filterCategory;
+                return matchesSearch && matchesCategory;
+              })
+              .map((item) => {
               const itemAction = actions[item.id] || { quantity: '', pessoaId: '' };
               return (
                 <tr key={item.id}>
