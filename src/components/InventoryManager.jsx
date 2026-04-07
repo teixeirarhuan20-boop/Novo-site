@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { supabase } from '../lib/supabase';
 
-export function InventoryManager({ inventory, setInventory, transactions = [] }) {
+export function InventoryManager({ inventory, setInventory, transactions = [], setTransactions }) {
   const [form, setForm] = useState({ name: '', category: '', quantity: '', price: '' });
   
   // Estado para controlar qual linha está sendo editada
@@ -11,6 +11,7 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
   // Estados para Filtros
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('');
+  const [filterQuantity, setFilterQuantity] = useState('all'); // 'all', 'in_stock', 'out_stock', 'low_stock'
   const [sortBy, setSortBy] = useState('name'); // 'name', 'quantity', 'price'
 
   const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
@@ -33,9 +34,34 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
     setForm({ name: '', category: '', quantity: '', price: '' });
     
     // Save to Supabase
-    supabase.from('inventory').insert([newItem]).then(({ error }) => {
-      if (error) console.error('Erro ao salvar no Supabase:', error);
-    });
+    async function syncToSupabase() {
+        // 1. Salva o item
+        const { error: invError } = await supabase.from('inventory').insert([newItem]);
+        
+        // 2. Se tiver quantidade inicial, registra no histórico
+        if (newItem.quantity > 0) {
+            const newTransaction = {
+                id: Date.now().toString() + Math.random().toString(),
+                type: 'entrada',
+                itemId: newItem.id,
+                itemName: newItem.name,
+                quantity: newItem.quantity,
+                unitPrice: newItem.price,
+                totalValue: newItem.price * newItem.quantity,
+                personName: 'Sistema (Cadastro)',
+                date: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
+            };
+            
+            setTransactions(prev => [...prev, newTransaction]);
+            const { error: traError } = await supabase.from('transactions').insert([newTransaction]);
+            
+            if (traError) console.error('Erro ao registrar transação inicial:', traError);
+        }
+
+        if (invError) console.error('Erro ao salvar no Supabase:', invError);
+    }
+    
+    syncToSupabase();
   };
 
   const deleteItem = async (id) => {
@@ -65,7 +91,7 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
     };
 
     setInventory(prev => prev.map(item => {
-      if (item.id === id) {
+      if (String(item.id) === String(id)) {
         return { ...item, ...updatedItem };
       }
       return item;
@@ -131,9 +157,16 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
 
   const filteredInventory = inventory
     .filter(item => {
-      const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase());
+      const q = Number(item.quantity);
+      const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase().trim());
       const matchesCategory = filterCategory === '' || item.category === filterCategory;
-      return matchesSearch && matchesCategory;
+      
+      let matchesQuantity = true;
+      if (filterQuantity === 'in_stock') matchesQuantity = q > 0;
+      else if (filterQuantity === 'out_stock') matchesQuantity = q === 0;
+      else if (filterQuantity === 'low_stock') matchesQuantity = q > 0 && q < 5;
+      
+      return matchesSearch && matchesCategory && matchesQuantity;
     })
     .sort((a, b) => {
       if (sortBy === 'name') return a.name.localeCompare(b.name);
@@ -186,6 +219,14 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
           </select>
         </div>
         <div className="filter-group">
+          <select value={filterQuantity} onChange={(e) => setFilterQuantity(e.target.value)} className="filter-select">
+            <option value="all">📦 Todos Níveis</option>
+            <option value="in_stock">✅ Em Estoque</option>
+            <option value="low_stock">⚠️ Estoque Baixo (&lt; 5)</option>
+            <option value="out_stock">❌ Sem Estoque</option>
+          </select>
+        </div>
+        <div className="filter-group">
           <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="filter-select">
             <option value="name">🔤 Nome (A-Z)</option>
             <option value="quantity">📊 Maior Estoque</option>
@@ -213,7 +254,7 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
           ) : (
             filteredInventory.map((item) => (
               <tr key={item.id}>
-                {editingId === item.id ? (
+                {String(editingId) === String(item.id) ? (
                   /* MODO DE EDIÇÃO (Inputs) */
                   <>
                     <td>
@@ -268,7 +309,7 @@ export function InventoryManager({ inventory, setInventory, transactions = [] })
                     </td>
                     <td>{item.category}</td>
                     <td>{item.quantity}</td>
-                    <td>R$ {item.price.toFixed(2)}</td>
+                    <td>R$ {Number(item.price || 0).toFixed(2)}</td>
                     <td style={{ display: 'flex', gap: '0.5rem' }}>
                       <button onClick={() => startEditing(item)} className="edit-btn">
                         Editar

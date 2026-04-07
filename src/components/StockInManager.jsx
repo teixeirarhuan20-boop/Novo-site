@@ -8,6 +8,7 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
   // Estados para Filtros
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('');
+  const [filterQuantity, setFilterQuantity] = useState('all'); // 'all', 'in_stock', 'low_stock', 'out_stock'
 
   const handleActionChange = (itemId, field, value) => {
     setActions(prev => ({
@@ -103,6 +104,14 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
             ))}
           </select>
         </div>
+        <div className="filter-group" style={{ width: '200px' }}>
+          <select value={filterQuantity} onChange={(e) => setFilterQuantity(e.target.value)} className="filter-select">
+            <option value="all">📦 Todos Níveis</option>
+            <option value="in_stock">✅ Em Estoque</option>
+            <option value="low_stock">⚠️ Estoque Baixo (&lt; 5)</option>
+            <option value="out_stock">❌ Sem Estoque</option>
+          </select>
+        </div>
       </div>
 
       <table>
@@ -116,24 +125,29 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
           </tr>
         </thead>
         <tbody>
-          {inventory
-            .filter(item => {
-              const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase());
+          {(() => {
+            const filteredItems = inventory.filter(item => {
+              const q = Number(item.quantity);
+              const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase().trim());
               const matchesCategory = filterCategory === '' || item.category === filterCategory;
-              return matchesSearch && matchesCategory;
-            })
-            .length === 0 ? (
-            <tr>
-              <td colSpan="5" style={{ textAlign: 'center', padding: '2rem', color: '#8e8e8e' }}>Nenhum produto encontrado.</td>
-            </tr>
-          ) : (
-            inventory
-              .filter(item => {
-                const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase());
-                const matchesCategory = filterCategory === '' || item.category === filterCategory;
-                return matchesSearch && matchesCategory;
-              })
-              .map((item) => {
+              
+              let matchesQuantity = true;
+              if (filterQuantity === 'in_stock') matchesQuantity = q > 0;
+              else if (filterQuantity === 'out_stock') matchesQuantity = q === 0;
+              else if (filterQuantity === 'low_stock') matchesQuantity = q > 0 && q < 5;
+              
+              return matchesSearch && matchesCategory && matchesQuantity;
+            });
+
+            if (filteredItems.length === 0) {
+              return (
+                <tr>
+                  <td colSpan="5" style={{ textAlign: 'center', padding: '2rem', color: '#8e8e8e' }}>Nenhum produto encontrado.</td>
+                </tr>
+              );
+            }
+
+            return filteredItems.map((item) => {
               const itemAction = actions[item.id] || { quantity: '', pessoaId: '' };
               return (
                 <tr key={item.id}>
@@ -192,9 +206,9 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
                     </div>
                   </td>
                 </tr>
-              )
-            })
-          )}
+              );
+            });
+          })()}
         </tbody>
       </table>
     </div>

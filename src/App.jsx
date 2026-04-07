@@ -20,9 +20,11 @@ function App() {
   const [pessoas, setPessoas] = useState([]);
   const [transactions, setTransactions] = useState([]);
 
-  // Carregar dados do Supabase ao iniciar
+  // Carregar dados do Supabase ao iniciar e configurar Realtime
   useEffect(() => {
     async function fetchData() {
+      console.log('--- INICIANDO CONEXÃO REALTIME ---');
+      
       // 1. Estoque
       const { data: inv } = await supabase.from('inventory').select('*');
       if (inv) setInventory(inv);
@@ -35,25 +37,54 @@ function App() {
       const { data: tra } = await supabase.from('transactions').select('*');
       if (tra) setTransactions(tra);
 
-      // 4. Leads (Opcional, se estiver usando)
-      // const { data: lds } = await supabase.from('leads').select('*');
-      // if (lds) setLeads(lds);
+      // --- CONFIGURAÇÃO DO REALTIME ---
+      // Escutar mudanças no Inventário
+      const channel = supabase
+        .channel('db-changes')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory' }, (payload) => {
+          console.log('RECEBIDO (Estoque):', payload);
+          if (payload.eventType === 'INSERT') {
+            setInventory(prev => {
+              if (prev.find(i => i.id === payload.new.id)) return prev;
+              return [...prev, payload.new];
+            });
+          } else if (payload.eventType === 'UPDATE') {
+            setInventory(prev => prev.map(item => item.id === payload.new.id ? payload.new : item));
+          } else if (payload.eventType === 'DELETE') {
+            setInventory(prev => prev.filter(item => item.id !== payload.old.id));
+          }
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'pessoas' }, (payload) => {
+          console.log('RECEBIDO (Pessoas):', payload);
+          if (payload.eventType === 'INSERT') {
+            setPessoas(prev => {
+              if (prev.find(p => p.id === payload.new.id)) return prev;
+              return [...prev, payload.new];
+            });
+          } else if (payload.eventType === 'UPDATE') {
+            setPessoas(prev => prev.map(p => p.id === payload.new.id ? payload.new : p));
+          } else if (payload.eventType === 'DELETE') {
+            setPessoas(prev => prev.filter(p => p.id !== payload.old.id));
+          }
+        })
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, (payload) => {
+          console.log('RECEBIDO (Transação):', payload);
+          setTransactions(prev => {
+            if (prev.find(t => t.id === payload.new.id)) return prev;
+            return [...prev, payload.new];
+          });
+        })
+        .subscribe((status) => {
+          console.log('STATUS DA CONEXÃO REALTIME:', status);
+        });
+
+      return () => {
+        supabase.removeChannel(channel);
+      };
     }
     fetchData();
   }, []);
 
-  // Persistência local (Opcional, mantida como backup rápido)
-  useEffect(() => {
-    localStorage.setItem('companyInventory', JSON.stringify(inventory));
-  }, [inventory]);
-
-  useEffect(() => {
-    localStorage.setItem('companyPessoas', JSON.stringify(pessoas));
-  }, [pessoas]);
-
-  useEffect(() => {
-    localStorage.setItem('companyTransactions', JSON.stringify(transactions));
-  }, [transactions]);
 
   const [messages, setMessages] = useState([
     { role: 'bot', text: 'Olá! Sou sua vendedora. Minha irmã gêmea (A Ana) atende os contatos lá na fila terceira aba!' }
@@ -140,11 +171,11 @@ function App() {
 
       <div className="main-content">
          
-         {activeTab === 'estoque' && <InventoryManager inventory={inventory} setInventory={setInventory} transactions={transactions} />}
+         {activeTab === 'estoque' && <InventoryManager inventory={inventory} setInventory={setInventory} transactions={transactions} setTransactions={setTransactions} />}
 
          {activeTab === 'entrada' && <StockInManager inventory={inventory} setInventory={setInventory} pessoas={pessoas} transactions={transactions} setTransactions={setTransactions} />}
          
-         {activeTab === 'historico' && <HistoryManager transactions={transactions} />}
+         {activeTab === 'historico' && <HistoryManager transactions={transactions} setTransactions={setTransactions} />}
          
          {activeTab === 'pessoas' && <PeopleManager pessoas={pessoas} setPessoas={setPessoas} />}
 
