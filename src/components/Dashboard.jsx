@@ -29,10 +29,15 @@ export function Dashboard({ inventory, transactions }) {
   }, [transactions, selectedProduct, selectedRegion]);
 
   // --- CALCULOS BI ---
-  const totalRevenue = filteredTransactions.reduce((acc, t) => acc + (Number(t.totalValue) || 0), 0);
+  const today = new Date().toLocaleDateString();
+  
+  const totalRevenue = filteredTransactions.filter(t => t.type === 'saída').reduce((acc, t) => acc + (Number(t.totalValue) || 0), 0);
   const totalSales = filteredTransactions.filter(t => t.type === 'saída').length;
-  const avgTicket = totalSales > 0 ? totalRevenue / totalSales : 0;
-  const totalProducts = [...new Set(filteredTransactions.map(t => t.itemName.split('||')[0].trim()))].length;
+  
+  const totalStock = inventory.reduce((acc, i) => acc + Number(i.quantity || 0), 0);
+  const exitsToday = transactions.filter(t => t.type === 'saída' && t.date.includes(today)).length;
+  const lowStockItems = inventory.filter(i => i.quantity > 0 && i.quantity < 5).length;
+  const totalInventoryValue = inventory.reduce((acc, i) => acc + (Number(i.quantity) * Number(i.price)), 0);
 
   // --- DADOS PARA O GRAFICO ---
   const chartData = filteredTransactions.reduce((acc, t) => {
@@ -201,24 +206,26 @@ export function Dashboard({ inventory, transactions }) {
       {/* SUMÁRIO GRID */}
       <div className="bi-summary-grid">
         <div className="bi-card">
-          <span className="bi-card-label">Receita Total</span>
-          <span className="bi-card-value">R$ {totalRevenue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
-          <span className="bi-card-trend bi-trend-up">▲ 12.5% vs anterior</span>
+          <span className="bi-card-label">📦 Total em Estoque</span>
+          <span className="bi-card-value">{totalStock.toLocaleString()} <small style={{ fontSize: '0.8rem', color: '#64748b' }}>un.</small></span>
+          <span className="bi-card-trend">Status: Normal</span>
         </div>
-        <div className="bi-card">
-          <span className="bi-card-label">Ticket Médio</span>
-          <span className="bi-card-value">R$ {avgTicket.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
-          <span className="bi-card-trend bi-trend-up">▲ 4.2% vs anterior</span>
+        <div className="bi-card" style={{ borderLeft: '4px solid #ef4444' }}>
+          <span className="bi-card-label">🔻 Saídas Hoje</span>
+          <span className="bi-card-value" style={{ color: '#ef4444' }}>{exitsToday}</span>
+          <span className="bi-card-trend" style={{ color: '#ef4444' }}>{exitsToday > 0 ? '▲ Movimentado' : 'Sem saídas'}</span>
         </div>
-        <div className="bi-card">
-          <span className="bi-card-label">Vendas Realizadas</span>
-          <span className="bi-card-value">{totalSales}</span>
-          <span className="bi-card-trend">Estável</span>
+        <div className="bi-card" style={{ borderLeft: '4px solid #f59e0b' }}>
+          <span className="bi-card-label">⚠️ Estoque Baixo</span>
+          <span className="bi-card-value" style={{ color: '#f59e0b' }}>{lowStockItems}</span>
+          <span className="bi-card-trend" style={{ color: '#f59e0b' }}>Itens críticos (&lt; 5)</span>
         </div>
-        <div className="bi-card">
-          <span className="bi-card-label">Produtos Ativos</span>
-          <span className="bi-card-value">{totalProducts}</span>
-          <span className="bi-card-trend bi-trend-down">▼ 2 desligados</span>
+        <div className="bi-card" style={{ borderLeft: '4px solid #10a37f' }}>
+          <span className="bi-card-label">💰 Valor Total Patrimonial</span>
+          <span className="bi-card-value" style={{ color: '#10a37f' }}>
+            <small style={{ fontSize: '1rem' }}>R$</small> {totalInventoryValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+          </span>
+          <span className="bi-card-trend" style={{ color: '#10a37f' }}>Faturamento Total: R$ {totalRevenue.toLocaleString('pt-BR')}</span>
         </div>
       </div>
 

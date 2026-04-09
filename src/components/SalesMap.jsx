@@ -4,10 +4,14 @@ export function SalesMap({ transactions = [], inventory = [], isActive = false }
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const markersRef = useRef([]);
+  const clusterGroupRef = useRef(null);
+  const heatLayerRef = useRef(null);
+  
   const [mappedCount, setMappedCount] = useState(0);
-
   const [selectedProduct, setSelectedProduct] = useState('All');
   const [selectedRegion, setSelectedRegion] = useState('All');
+  const [dateRange, setDateRange] = useState('all'); // '7d', '30d', 'all'
+  const [mapMode, setMapMode] = useState('cluster'); // 'pins', 'cluster', 'heat'
   const [filteredTransactions, setFilteredTransactions] = useState(transactions);
 
   // --- LOGICA DE FILTRO ---
@@ -25,8 +29,20 @@ export function SalesMap({ transactions = [], inventory = [], isActive = false }
         return (loc?.city || t.city) === selectedRegion;
       });
     }
+    if (dateRange !== 'all') {
+      const days = dateRange === '7d' ? 7 : 30;
+      const limitDate = new Date();
+      limitDate.setDate(limitDate.getDate() - days);
+      
+      filtered = filtered.filter(t => {
+        // Converte DD/MM/AAAA para objeto Date
+        const [day, month, year] = t.date.split(' ')[0].split('/');
+        const transactionDate = new Date(`${year}-${month}-${day}`);
+        return transactionDate >= limitDate;
+      });
+    }
     setFilteredTransactions(filtered);
-  }, [transactions, selectedProduct, selectedRegion]);
+  }, [transactions, selectedProduct, selectedRegion, dateRange]);
 
   // LÓGICA DE DESEMPACOTAMENTO (SMART STRING)
   // Formato: "NomeProduto ||Cidade;Lat;Lng;OrderID;NF;CEP;Endereco||"
@@ -188,7 +204,7 @@ export function SalesMap({ transactions = [], inventory = [], isActive = false }
            <p style={{ color: '#64748b' }}>Análise de performance com filtros avançados.</p>
         </div>
         <div className="bi-filter-bar" style={{ margin: 0 }}>
-          <div className="bi-filter-group">
+          <div className="bi-filter-group" style={{ minWidth: '120px' }}>
             <label>PRODUTO</label>
             <select value={selectedProduct} onChange={(e) => setSelectedProduct(e.target.value)}>
               <option value="All">Todos</option>
@@ -197,7 +213,7 @@ export function SalesMap({ transactions = [], inventory = [], isActive = false }
               ))}
             </select>
           </div>
-          <div className="bi-filter-group">
+          <div className="bi-filter-group" style={{ minWidth: '120px' }}>
             <label>REGIÃO</label>
             <select value={selectedRegion} onChange={(e) => setSelectedRegion(e.target.value)}>
               <option value="All">Todas</option>
@@ -205,6 +221,22 @@ export function SalesMap({ transactions = [], inventory = [], isActive = false }
                 <option key={r} value={r}>{r}</option>
               ))}
             </select>
+          </div>
+          <div className="bi-filter-group" style={{ minWidth: '120px' }}>
+            <label>PERÍODO</label>
+            <select value={dateRange} onChange={(e) => setDateRange(e.target.value)}>
+              <option value="all">Todo o histórico</option>
+              <option value="7d">Últimos 7 dias</option>
+              <option value="30d">Últimos 30 dias</option>
+            </select>
+          </div>
+          <div className="bi-filter-group" style={{ minWidth: '140px' }}>
+            <label>VISUALIZAÇÃO</label>
+            <div style={{ display: 'flex', gap: '5px', background: '#fff', padding: '2px', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+               <button onClick={() => setMapMode('cluster')} style={{ flex: 1, border: 'none', background: mapMode === 'cluster' ? '#3b82f6' : 'transparent', color: mapMode === 'cluster' ? '#fff' : '#64748b', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', padding: '5px' }}>📦 Cluster</button>
+               <button onClick={() => setMapMode('pins')} style={{ flex: 1, border: 'none', background: mapMode === 'pins' ? '#3b82f6' : 'transparent', color: mapMode === 'pins' ? '#fff' : '#64748b', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', padding: '5px' }}>📍 Pins</button>
+               <button onClick={() => setMapMode('heat')} style={{ flex: 1, border: 'none', background: mapMode === 'heat' ? '#3b82f6' : 'transparent', color: mapMode === 'heat' ? '#fff' : '#64748b', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', padding: '5px' }}>🔥 Calor</button>
+            </div>
           </div>
         </div>
       </div>

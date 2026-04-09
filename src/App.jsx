@@ -17,6 +17,7 @@ import './index.css';
 
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard'); 
+  const [uiMode, setUiMode] = useState('pro'); // 'pro' ou 'classic'
   
   const [inventory, setInventory] = useState([]);
   const [leads, setLeads] = useState([]);
@@ -154,11 +155,11 @@ function App() {
   };
 
   return (
-    <div className="dashboard-layout">
+    <div className={`dashboard-layout ui-mode-${uiMode}`}>
       <div className="sidebar">
-        <h2>Meu Negócio CRM</h2>
+        <h2 className="sidebar-logo">MEU NEGÓCIO <span style={{ color: '#3b82f6' }}>PRO</span></h2>
         
-        <div style={{ padding: '0 1rem', fontSize: '0.7rem', color: '#64748b', marginTop: '1.5rem', fontWeight: 'bold' }}>ANÁLISE</div>
+        <div className="sidebar-section">ANÁLISE</div>
         <button className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveTab('dashboard')}>📊 Dashboard</button>
         <button className={`nav-item ${activeTab === 'mapa' ? 'active' : ''}`} onClick={() => setActiveTab('mapa')}>🗺️ Mapa do Brasil</button>
         
@@ -173,6 +174,15 @@ function App() {
 
         <div style={{ padding: '0 1rem', fontSize: '0.7rem', color: '#64748b', marginTop: '1.5rem', fontWeight: 'bold' }}>SISTEMA</div>
         <button className={`nav-item ${activeTab === 'logs' ? 'active' : ''}`} onClick={() => setActiveTab('logs')}>🚨 Log de Erros</button>
+
+        <div className="sidebar-footer" style={{ marginTop: 'auto', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }}>
+          <button 
+            className="ui-toggle-btn" 
+            onClick={() => setUiMode(uiMode === 'pro' ? 'classic' : 'pro')}
+          >
+            {uiMode === 'pro' ? '✨ Mudar p/ Clássico' : '🚀 Ativar Modo Pro'}
+          </button>
+        </div>
       </div>
 
       <div className="main-content">
