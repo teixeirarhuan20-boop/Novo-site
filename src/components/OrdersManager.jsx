@@ -146,6 +146,9 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
   const [locationInput, setLocationInput] = useState('');
   const [orderRef, setOrderRef] = useState('');
   const [fullAddress, setFullAddress] = useState('');
+  const [bairro, setBairro] = useState('');
+  const [rastreio, setRastreio] = useState('');
+  const [modalidade, setModalidade] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [message, setMessage] = useState('');
 
@@ -216,8 +219,8 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
       }
 
       // 2. Preparar "Smart String" para o mapa
-      // Formato: NomeProduto ||Cidade;Lat;Lng;OrderID;NF;CEP;Endereco||
-      const packedItemName = `${item.name} ||${locationInput};${lat};${lng};${orderRef};;;${fullAddress}||`;
+      // Formato: NomeProduto ||Cidade;Lat;Lng;OrderID;NF;CEP;Endereco;Bairro;Rastreio;Modalidade||
+      const packedItemName = `${item.name} ||${locationInput};${lat};${lng};${orderRef};;${locationInput.match(/\d{5}-?\d{3}/)?.[0] || ''};${fullAddress};${bairro};${rastreio};${modalidade}||`;
       const newQuantity = Number(item.quantity) - Number(quantity);
 
       // 3. Registrar Transação
@@ -253,6 +256,9 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
       setLocationInput('');
       setOrderRef('');
       setFullAddress('');
+      setBairro('');
+      setRastreio('');
+      setModalidade('');
       setMessage('✅ Pedido realizado com sucesso! Estoque atualizado e mapa marcado.');
       
       setTimeout(() => setMessage(''), 5000);
@@ -281,17 +287,14 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
           addToast={addToast}
           onDataExtracted={async (dadosIA) => {
             if (dadosIA.location || dadosIA.cep) {
-              setLocationInput(dadosIA.location ? `${dadosIA.location} - CEP: ${dadosIA.cep || ''}` : dadosIA.cep);
+              setLocationInput(dadosIA.location ? `${dadosIA.location}${dadosIA.cep ? ' - CEP: ' + dadosIA.cep : ''}` : dadosIA.cep);
             }
-            if (dadosIA.quantity) {
-              setQuantity(dadosIA.quantity);
-            }
-            if (dadosIA.orderRef) {
-              setOrderRef(dadosIA.orderRef);
-            }
-            if (dadosIA.fullAddress) {
-              setFullAddress(dadosIA.fullAddress);
-            }
+            if (dadosIA.quantity)  setQuantity(dadosIA.quantity);
+            if (dadosIA.orderId)   setOrderRef(dadosIA.orderId);
+            if (dadosIA.address)   setFullAddress(dadosIA.address);
+            if (dadosIA.bairro)    setBairro(dadosIA.bairro);
+            if (dadosIA.rastreio)  setRastreio(dadosIA.rastreio);
+            if (dadosIA.modalidade) setModalidade(dadosIA.modalidade);
             
             // Lógica de Autocadastro de Cliente
             if (dadosIA.customerName) {
@@ -424,6 +427,50 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
                 style={{ padding: '0.6rem', borderRadius: '6px', border: '1px solid #cbd5e1' }}
               />
             </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <div className="bi-filter-group">
+              <label>BAIRRO</label>
+              <input 
+                type="text" 
+                placeholder="Ex: Pajuçara" 
+                value={bairro} 
+                onChange={(e) => setBairro(e.target.value)} 
+                className="input-field"
+                style={{ padding: '0.6rem', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+              />
+            </div>
+            <div className="bi-filter-group">
+              <label>RASTREIO</label>
+              <input 
+                type="text" 
+                placeholder="Ex: BR2641257085334" 
+                value={rastreio} 
+                onChange={(e) => setRastreio(e.target.value)} 
+                className="input-field"
+                style={{ padding: '0.6rem', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+              />
+            </div>
+          </div>
+
+          <div className="bi-filter-group">
+            <label>MODALIDADE DE ENVIO</label>
+            <select
+              value={modalidade}
+              onChange={(e) => setModalidade(e.target.value)}
+              style={{ padding: '0.6rem', borderRadius: '6px', border: '1px solid #cbd5e1', width: '100%' }}
+            >
+              <option value="">Selecione a modalidade...</option>
+              <option value="COLETA">COLETA</option>
+              <option value="PAC">PAC</option>
+              <option value="SEDEX">SEDEX</option>
+              <option value="SEDEX 10">SEDEX 10</option>
+              <option value="JADLOG">JADLOG</option>
+              <option value="CORREIOS">CORREIOS</option>
+              <option value="TRANSPORTADORA">TRANSPORTADORA</option>
+              <option value="RETIRADA">RETIRADA</option>
+            </select>
           </div>
 
           <button 
