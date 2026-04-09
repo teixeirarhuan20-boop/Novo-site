@@ -33,56 +33,73 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
     }
 
     const pessoa = pessoas.find(p => p.id === pessoaId);
+    const locationInput = itemAction.location || '';
 
-    // Atualiza estoque
-    const newQuantity = type === 'entrada' ? item.quantity + quantity : item.quantity - quantity;
-    setInventory(prev => prev.map(i => {
-      if (i.id === item.id) {
-        return { ...i, quantity: newQuantity };
-      }
-      return i;
-    }));
-
-    // Registra transação
-    const newTransaction = {
-      id: Date.now().toString() + Math.random().toString(),
-      type: type,
-      itemId: item.id,
-      itemName: item.name,
-      quantity: quantity,
-      unitPrice: item.price,
-      totalValue: item.price * quantity,
-      personName: pessoa ? pessoa.name : '',
-      date: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
+    // Função interna para geo-codificação automática
+    const getCoordinates = async (query) => {
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ', Brazil')}`);
+        const data = await res.json();
+        if (data && data.length > 0) return { lat: data[0].lat, lng: data[0].lon };
+      } catch (e) { /* ignore */ }
+      return { lat: null, lng: null };
     };
-    setTransactions(prev => [...prev, newTransaction]);
 
-    // Save to Supabase (Atomic updates)
-    async function syncToSupabase() {
-      const { error: invError } = await supabase.from('inventory').update({ quantity: newQuantity }).eq('id', item.id);
-      const { error: traError } = await supabase.from('transactions').insert([newTransaction]);
-      
-      if (invError || traError) {
-        console.error('Erro ao sincronizar com Supabase:', invError || traError);
-      }
-    }
-    syncToSupabase();
+    const processTransaction = async () => {
+        let lat = null, lng = null;
+        if (type === 'saida' && locationInput) {
+            const coords = await getCoordinates(locationInput);
+            lat = coords.lat;
+            lng = coords.lng;
+        }
 
-    // Limpa os campos daquele item
-    setActions(prev => ({
-      ...prev,
-      [item.id]: { quantity: '', pessoaId: '' }
-    }));
-    
-    // Feedback visual opcional
-    alert(`Sucesso! ${type === 'entrada' ? 'Entrada' : 'Saída'} de ${quantity} un. de ${item.name} registrada.`);
+        // Atualiza estoque
+        const newQuantity = type === 'entrada' ? item.quantity + quantity : item.quantity - quantity;
+        setInventory(prev => prev.map(i => {
+          if (i.id === item.id) return { ...i, quantity: newQuantity };
+          return i;
+        }));
+
+        // REGISTRO "INTELIGENTE" (Empacota localização no nome no formato ||cidade;lat;lng||)
+        const locationData = locationInput ? `||${locationInput};${lat};${lng}||` : "";
+        const packedItemName = type === 'saida' ? `${item.name} ${locationData}` : item.name;
+
+        // Registra transação
+        const newTransaction = {
+          id: Date.now().toString() + Math.random().toString(),
+          type: type,
+          itemId: item.id,
+          itemName: packedItemName,
+          quantity: quantity,
+          unitPrice: item.price,
+          totalValue: item.price * quantity,
+          personName: pessoa ? pessoa.name : '',
+          date: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
+        };
+
+        setTransactions(prev => [...prev, newTransaction]);
+
+        // Sincroniza Supabase
+        const { error: invError } = await supabase.from('inventory').update({ quantity: newQuantity }).eq('id', item.id);
+        const { error: traError } = await supabase.from('transactions').insert([newTransaction]);
+        
+        if (invError || traError) {
+            // Error handling
+        }
+
+        // Limpa os campos
+        setActions(prev => ({ ...prev, [item.id]: { quantity: '', pessoaId: '', location: '' } }));
+        alert(`Sucesso! ${type === 'entrada' ? 'Entrada' : 'Saída'} de ${quantity} un. de ${item.name} registrada.`);
+    };
+
+    processTransaction();
   };
 
   return (
     <div className="inventory-panel">
-      <h1>Entradas e Saídas Rápidas</h1>
+      <h1>🔁 Gestão de Movimentações</h1>
       <p style={{marginBottom: '1rem', color: '#8e8e8e'}}>
-        Abaixo estão todos os produtos cadastrados. Você pode adicionar (entrada) ou remover (saída) quantidades rapidamente.
+        Entradas de estoque, ajustes técnicos e reposições manuais de produtos.
       </p>
 
       {/* Barra de Filtros */}
@@ -175,17 +192,27 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
                     />
                   </td>
                   <td>
-                    <select 
-                      value={itemAction.pessoaId} 
-                      onChange={(e) => handleActionChange(item.id, 'pessoaId', e.target.value)}
-                      className="inline-input"
-                      style={{ margin: 0, width: '150px' }}
-                    >
-                      <option value="">-- Ninguém --</option>
-                      {pessoas.map(p => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </select>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                        <select 
+                        value={itemAction.pessoaId} 
+                        onChange={(e) => handleActionChange(item.id, 'pessoaId', e.target.value)}
+                        className="inline-input"
+                        style={{ margin: 0, width: '150px' }}
+                        >
+                        <option value="">-- Ninguém --</option>
+                        {pessoas.map(p => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                        </select>
+                        <input 
+                        type="text" 
+                        placeholder="Local (Cidade/CEP)" 
+                        value={itemAction.location || ''} 
+                        onChange={(e) => handleActionChange(item.id, 'location', e.target.value)}
+                        className="inline-input"
+                        style={{ margin: 0, width: '150px', fontSize: '0.8rem' }}
+                        />
+                    </div>
                   </td>
                   <td>
                     <div style={{ display: 'flex', gap: '0.5rem' }}>

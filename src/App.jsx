@@ -2,17 +2,21 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ChatMessage } from './components/ChatMessage';
 import { ChatInput } from './components/ChatInput';
 import { InventoryManager } from './components/InventoryManager';
+import { Dashboard } from './components/Dashboard';
 import { LeadsManager } from './components/LeadsManager';
 import { OutreachManager } from './components/OutreachManager';
 import { PeopleManager } from './components/PeopleManager';
 import { HistoryManager } from './components/HistoryManager';
 import { StockInManager } from './components/StockInManager';
+import { OrdersManager } from './components/OrdersManager';
+import { SalesMap } from './components/SalesMap';
+import { SystemLogManager } from './components/SystemLogManager';
 import { sendMessageToGemini } from './gemini';
 import { supabase } from './lib/supabase';
 import './index.css';
 
 function App() {
-  const [activeTab, setActiveTab] = useState('estoque'); 
+  const [activeTab, setActiveTab] = useState('dashboard'); 
   
   const [inventory, setInventory] = useState([]);
   const [leads, setLeads] = useState([]);
@@ -20,34 +24,58 @@ function App() {
   const [pessoas, setPessoas] = useState([]);
   const [transactions, setTransactions] = useState([]);
 
+  // --- TOAST SYSTEM ---
+  const [toasts, setToasts] = useState([]);
+  
+  const addToast = (message, type = 'info') => {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000); // Some após 5 segundos
+  };
+
   // Carregar dados do Supabase ao iniciar e configurar Realtime
   useEffect(() => {
     async function fetchData() {
-      console.log('--- INICIANDO CONEXÃO REALTIME ---');
-      
-      // 1. Estoque
-      const { data: inv } = await supabase.from('inventory').select('*');
-      if (inv) setInventory(inv);
+      console.log('--- INICIANDO CONEXÃO ---');
+      try {
+        // 0. Verifica se a coluna 'color' existe no inventário
+        const { error: colorCheckError } = await supabase.from('inventory').select('color').limit(1);
+        if (colorCheckError && colorCheckError.message.includes('color')) {
+          // Coluna não existe — exibe alerta com SQL para o usuário adicionar
+          console.warn('Coluna color não existe no inventory. Adicione via SQL Editor do Supabase.');
+          addToast(
+            '⚠️ Execute no Supabase SQL Editor: ALTER TABLE inventory ADD COLUMN color text DEFAULT \'#2563eb\';',
+            'error'
+          );
+        }
 
-      // 2. Pessoas
-      const { data: pes } = await supabase.from('pessoas').select('*');
-      if (pes) setPessoas(pes);
+        // 1. Estoque — cor agora vem direto do Supabase
+        const { data: inv, error: invErr } = await supabase.from('inventory').select('*');
+        if (invErr) throw invErr;
+        if (inv) setInventory(inv);
 
-      // 3. Transações
-      const { data: tra } = await supabase.from('transactions').select('*');
-      if (tra) setTransactions(tra);
+        // 2. Pessoas
+        const { data: pes, error: pesErr } = await supabase.from('pessoas').select('*');
+        if (pesErr) throw pesErr;
+        if (pes) setPessoas(pes);
+
+        // 3. Transações
+        const { data: tra, error: traErr } = await supabase.from('transactions').select('*');
+        if (traErr) throw traErr;
+        if (tra) setTransactions(tra);
+
+        console.log('--- DADOS CARREGADOS COM SUCESSO ---');
+      } catch (err) {
+        console.error('ERRO AO CARREGAR DADOS:', err);
+        addToast('Erro ao carregar dados do servidor. Verifique sua conexão.', 'error');
+      }
 
       // --- CONFIGURAÇÃO DO REALTIME ---
-      // Escutar mudanças no Inventário
       const channel = supabase
         .channel('db-changes')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory' }, (payload) => {
-          console.log('RECEBIDO (Estoque):', payload);
           if (payload.eventType === 'INSERT') {
-            setInventory(prev => {
-              if (prev.find(i => i.id === payload.new.id)) return prev;
-              return [...prev, payload.new];
-            });
+            setInventory(prev => prev.find(i => i.id === payload.new.id) ? prev : [...prev, payload.new]);
           } else if (payload.eventType === 'UPDATE') {
             setInventory(prev => prev.map(item => item.id === payload.new.id ? payload.new : item));
           } else if (payload.eventType === 'DELETE') {
@@ -55,12 +83,8 @@ function App() {
           }
         })
         .on('postgres_changes', { event: '*', schema: 'public', table: 'pessoas' }, (payload) => {
-          console.log('RECEBIDO (Pessoas):', payload);
           if (payload.eventType === 'INSERT') {
-            setPessoas(prev => {
-              if (prev.find(p => p.id === payload.new.id)) return prev;
-              return [...prev, payload.new];
-            });
+            setPessoas(prev => prev.find(p => p.id === payload.new.id) ? prev : [...prev, payload.new]);
           } else if (payload.eventType === 'UPDATE') {
             setPessoas(prev => prev.map(p => p.id === payload.new.id ? payload.new : p));
           } else if (payload.eventType === 'DELETE') {
@@ -68,15 +92,9 @@ function App() {
           }
         })
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, (payload) => {
-          console.log('RECEBIDO (Transação):', payload);
-          setTransactions(prev => {
-            if (prev.find(t => t.id === payload.new.id)) return prev;
-            return [...prev, payload.new];
-          });
+          setTransactions(prev => prev.find(t => t.id === payload.new.id) ? prev : [...prev, payload.new]);
         })
-        .subscribe((status) => {
-          console.log('STATUS DA CONEXÃO REALTIME:', status);
-        });
+        .subscribe();
 
       return () => {
         supabase.removeChannel(channel);
@@ -85,34 +103,12 @@ function App() {
     fetchData();
   }, []);
 
-
   const [messages, setMessages] = useState([
     { role: 'bot', text: 'Olá! Sou sua vendedora. Minha irmã gêmea (A Ana) atende os contatos lá na fila terceira aba!' }
   ]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isChatOpen, setIsChatOpen] = useState(true);
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const messagesEndRef = useRef(null);
-
-  // Bind Persistência de Dados
-  useEffect(() => {
-    localStorage.setItem('companyInventory', JSON.stringify(inventory));
-  }, [inventory]);
-
-  useEffect(() => {
-    localStorage.setItem('companyLeads', JSON.stringify(leads));
-  }, [leads]);
-  
-  useEffect(() => {
-    localStorage.setItem('companyOutreach', JSON.stringify(outreachLeads));
-  }, [outreachLeads]);
-
-  useEffect(() => {
-    localStorage.setItem('companyPessoas', JSON.stringify(pessoas));
-  }, [pessoas]);
-
-  useEffect(() => {
-    localStorage.setItem('companyTransactions', JSON.stringify(transactions));
-  }, [transactions]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -161,44 +157,77 @@ function App() {
     <div className="dashboard-layout">
       <div className="sidebar">
         <h2>Meu Negócio CRM</h2>
+        
+        <div style={{ padding: '0 1rem', fontSize: '0.7rem', color: '#64748b', marginTop: '1.5rem', fontWeight: 'bold' }}>ANÁLISE</div>
+        <button className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveTab('dashboard')}>📊 Dashboard</button>
+        <button className={`nav-item ${activeTab === 'mapa' ? 'active' : ''}`} onClick={() => setActiveTab('mapa')}>🗺️ Mapa do Brasil</button>
+        
+        <div style={{ padding: '0 1rem', fontSize: '0.7rem', color: '#64748b', marginTop: '1.5rem', fontWeight: 'bold' }}>OPERAÇÃO</div>
+        <button className={`nav-item ${activeTab === 'pedidos' ? 'active' : ''}`} onClick={() => setActiveTab('pedidos')}>🛒 Pedidos</button>
+        <button className={`nav-item ${activeTab === 'entrada' ? 'active' : ''}`} onClick={() => setActiveTab('entrada')}>🔁 Movimentações</button>
+        
+        <div style={{ padding: '0 1rem', fontSize: '0.7rem', color: '#64748b', marginTop: '1.5rem', fontWeight: 'bold' }}>GESTÃO</div>
         <button className={`nav-item ${activeTab === 'estoque' ? 'active' : ''}`} onClick={() => setActiveTab('estoque')}>📦 Seu Estoque</button>
-        <button className={`nav-item ${activeTab === 'entrada' ? 'active' : ''}`} onClick={() => setActiveTab('entrada')}>🔁 Entradas / Saídas</button>
-        <button className={`nav-item ${activeTab === 'historico' ? 'active' : ''}`} onClick={() => setActiveTab('historico')}>📜 Histórico</button>
         <button className={`nav-item ${activeTab === 'pessoas' ? 'active' : ''}`} onClick={() => setActiveTab('pessoas')}>👥 Pessoas</button>
-        {/* <button className={`nav-item ${activeTab === 'leads' ? 'active' : ''}`} onClick={() => setActiveTab('leads')}>👥 CRM Leads</button> */}
-        {/* <button className={`nav-item ${activeTab === 'abordagem' ? 'active' : ''}`} onClick={() => setActiveTab('abordagem')}>💌 Abordagem (Ana)</button> */}
+        <button className={`nav-item ${activeTab === 'historico' ? 'active' : ''}`} onClick={() => setActiveTab('historico')}>📜 Histórico</button>
+
+        <div style={{ padding: '0 1rem', fontSize: '0.7rem', color: '#64748b', marginTop: '1.5rem', fontWeight: 'bold' }}>SISTEMA</div>
+        <button className={`nav-item ${activeTab === 'logs' ? 'active' : ''}`} onClick={() => setActiveTab('logs')}>🚨 Log de Erros</button>
       </div>
 
       <div className="main-content">
+         <div style={{ display: activeTab === 'dashboard' ? 'block' : 'none', height: '100%' }}>
+            <Dashboard inventory={inventory} transactions={transactions} />
+         </div>
          
-         {activeTab === 'estoque' && <InventoryManager inventory={inventory} setInventory={setInventory} transactions={transactions} setTransactions={setTransactions} />}
+         <div style={{ display: activeTab === 'mapa' ? 'block' : 'none', height: '100%' }}>
+            <SalesMap transactions={transactions} inventory={inventory} isActive={activeTab === 'mapa'} />
+         </div>
 
-         {activeTab === 'entrada' && <StockInManager inventory={inventory} setInventory={setInventory} pessoas={pessoas} transactions={transactions} setTransactions={setTransactions} />}
-         
-         {activeTab === 'historico' && <HistoryManager transactions={transactions} setTransactions={setTransactions} />}
-         
-         {activeTab === 'pessoas' && <PeopleManager pessoas={pessoas} setPessoas={setPessoas} />}
+         <div style={{ display: activeTab === 'pedidos' ? 'block' : 'none', height: '100%' }}>
+            <OrdersManager inventory={inventory} setInventory={setInventory} pessoas={pessoas} setPessoas={setPessoas} transactions={transactions} setTransactions={setTransactions} addToast={addToast} isActive={activeTab === 'pedidos'} />
+         </div>
 
-         {/* activeTab === 'leads' && (
+         <div style={{ display: activeTab === 'estoque' ? 'block' : 'none', height: '100%' }}>
+            <InventoryManager inventory={inventory} setInventory={setInventory} transactions={transactions} setTransactions={setTransactions} />
+         </div>
+
+         <div style={{ display: activeTab === 'entrada' ? 'block' : 'none', height: '100%' }}>
+            <StockInManager inventory={inventory} setInventory={setInventory} pessoas={pessoas} transactions={transactions} setTransactions={setTransactions} />
+         </div>
+         
+         <div style={{ display: activeTab === 'historico' ? 'block' : 'none', height: '100%' }}>
+            <HistoryManager transactions={transactions} setTransactions={setTransactions} />
+         </div>
+         
+         <div style={{ display: activeTab === 'pessoas' ? 'block' : 'none', height: '100%' }}>
+            <PeopleManager pessoas={pessoas} setPessoas={setPessoas} transactions={transactions} />
+         </div>
+         
+         <div style={{ display: activeTab === 'logs' ? 'block' : 'none', height: '100%' }}>
+            <SystemLogManager />
+         </div>
+
+         {activeTab === 'leads' && (
            <div className="inventory-panel"> 
              <LeadsManager leads={leads} setLeads={setLeads} sendToAna={handleSendToAna} />
            </div>
-         ) */}
+         )}
          
-         {/* activeTab === 'abordagem' && (
+         {activeTab === 'abordagem' && (
            <div className="inventory-panel"> 
              <OutreachManager outreachLeads={outreachLeads} setOutreachLeads={setOutreachLeads} inventory={inventory} />
            </div>
-         ) */}
+         )}
          
-         {/* !isChatOpen && (
+         {!isChatOpen && (
            <button className="floating-chat-btn" onClick={() => setIsChatOpen(true)}>
              💬 Falar com a Vendedora
            </button>
-         ) */}
+         )}
       </div>
 
-      {/* isChatOpen && (
+      {isChatOpen && (
         <div className="ai-panel">
           <div className="chat-header">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
@@ -215,7 +244,20 @@ function App() {
           </div>
           <ChatInput onSendMessage={handleSendMessage} disabled={isLoading} />
         </div>
-      ) */}
+      )}
+
+      {/* TOAST RENDERER */}
+      <div className="toast-container">
+        {toasts.map(toast => (
+          <div key={toast.id} className={`toast ${toast.type}`}>
+            {toast.type === 'success' && '✅'}
+            {toast.type === 'error' && '❌'}
+            {toast.type === 'warning' && '⚠️'}
+            {toast.type === 'info' && 'ℹ️'}
+            <span>{toast.message}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

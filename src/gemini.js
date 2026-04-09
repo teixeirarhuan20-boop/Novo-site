@@ -3,131 +3,214 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 const genAI = new GoogleGenerativeAI(apiKey);
 
-const tools = [
-  { googleSearch: {} }
-];
+// ─── UTILITÁRIO GLOBAL: extrator de JSON ─────────────────────────────────────
+function extractJson(text) {
+  if (!text) return null;
+  let cleanText = text.trim();
+  const start = cleanText.indexOf('{');
+  const end = cleanText.lastIndexOf('}');
+  
+  if (start !== -1 && end !== -1) {
+    let rawJson = cleanText.substring(start, end + 1);
+    
+    // Traduz formatos Python/Alucinações comuns para JSON válido
+    rawJson = rawJson
+      .replace(/'/g, '"')
+      .replace(/: None/g, ': null')
+      .replace(/:None/g, ':null')
+      .replace(/True/g, 'true')
+      .replace(/False/g, 'false');
 
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash", tools });
+    try {
+      let obj = JSON.parse(rawJson);
+      return {
+        customerName: obj.customerName || obj.customer_name || obj.cliente || obj.destinatario || null,
+        productName:  obj.productName || obj.product_name || obj.produto || null,
+        location:     obj.location || obj.city || obj.cidade || null,
+        cep:          obj.cep || obj.postal_code || obj.postal || null,
+        address:      obj.address || obj.endereco || null,
+        orderId:      obj.orderId || obj.order_id || obj.pedido || null,
+        nf:           obj.nf || obj.nota_fiscal || obj.invoice || null,
+        quantity:     Number(obj.quantity || obj.qtd || obj.quantidade || 1),
+        productId:    obj.productId || obj.product_id || null,
+        customerId:   obj.customerId || obj.customer_id || null
+      };
+    } catch (e) {
+      console.error("Erro no parse de JSON extraído:", e, rawJson);
+      return null;
+    }
+  }
+  return null;
+}
+
+// ─── CONEXÃO DIRETA COM GOOGLE API (v1beta) ──────────────────────────────────
+// Esta função ignora o SDK problemático e fala direto com o endpoint v1beta
+async function callGeminiDirectV1beta(payload) {
+  // Removido o gemini-pro (descontinuado) e adicionado o gemini-2.5-flash e 1.5-pro
+  const models = ['gemini-2.5-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro-latest'];
+  let errs = [];
+
+  for (const modelName of models) {
+    try {
+      if (window.addSystemLog) window.addSystemLog(`Tentando API v1beta direta (${modelName})...`, 'info');
+      
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json();
+      if (data.error) throw new Error(`${data.error.code}: ${data.error.message}`);
+      
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) return text;
+    } catch (e) {
+      errs.push(`[${modelName}]: ${e.message}`);
+      if (window.addSystemLog) window.addSystemLog(`v1beta (${modelName}) falhou: ${e.message}`, 'warn');
+    }
+  }
+  
+  const errorString = errs.join('\n');
+  if (errorString.includes('429') || errorString.includes('Quota')) {
+    throw new Error("⏳ Limite de leituras rápido atingido (Camada Gratuita)! Por favor, respire fundo, aguarde cerca de 1 minutinho e tente novamente. 🤖");
+  }
+  throw new Error(`A API do Google recusou a conexão:\n${errorString}`);
+}
 
 export async function sendMessageToGemini(history, message, inventory, onLeadCaptured) {
   try {
-    let cleanHistory = history;
-    if (cleanHistory.length > 0 && cleanHistory[0].role === 'bot') {
-      cleanHistory = cleanHistory.slice(1);
-    }
-
-    const chat = model.startChat({
-      history: cleanHistory.map(msg => ({
-        role: msg.role === 'bot' ? 'model' : 'user',
-        parts: [{ text: msg.text }],
-      })),
-      generationConfig: {
-        maxOutputTokens: 2000,
-        temperature: 0.2, // Reduzi a temperatura para focar nela obedecendo o JSON estritamente
-      },
-    });
-
-    const inventoryContext = JSON.stringify(inventory.map(i => ({Produto: i.name, Categoria: i.category, Qtde: i.quantity, Preco: i.price})));
-    
-    // Instruímos firmemente como exportar a lista!
-    const enrichedMessage = `[SISTEMA INTERNO: ESTOQUE\n${inventoryContext}]\n
-    Você é a assistente comercial.
-    Comando: O usuário vai pedir lojas/leads. Você busca no Google.
-    
-    REGRA CRÍTICA DE COMUNICAÇÃO DE DADOS: O sistema web NÃO recebe a lista se você não escrever em JSON. Se você encontrar empresas no Google, OBRIGATORIAMENTE escreva a lista final dentro de um bloco de código json com chave de array []. 
-    Exemplo estrito:
-    \`\`\`json
-    [
-      { "nome": "Empresa XY", "email": "contato@site", "telefone": "1199", "site": "site.com" }
-    ]
-    \`\`\`
-    Insira isso no meio da sua resposta!
-    
-    \nUsuário: ${message}`;
-
-    const result = await chat.sendMessage(enrichedMessage);
-    let originalText = result.response.text();
-    console.log("RESPOSTA CRUA DO GEMINI: ", originalText);
-    
-    let leadEncontradoAqui = false;
-
-    // 1. Tenta Extração Padrão (com ou sem a palavra 'json' na tag)
-    try {
-      const jsonRegex = /```(?:json)?\s*(\[[\s\S]*?\])\s*```/gi;
-      let match;
-      while ((match = jsonRegex.exec(originalText)) !== null) {
-         const extractedData = JSON.parse(match[1]);
-         if (Array.isArray(extractedData)) {
-            extractedData.forEach(l => onLeadCaptured(l));
-            leadEncontradoAqui = true;
-         }
-      }
-    } catch(e) {
-      console.warn("Regex padrão falhou", e);
-    }
-
-    // 2. Tenta Força Bruta (caso ela envie sem os backticks do markdown!)
-    if (!leadEncontradoAqui) {
-      try {
-         const firstP = originalText.indexOf('[');
-         const lastP = originalText.lastIndexOf(']');
-         if (firstP !== -1 && lastP !== -1 && lastP > firstP) {
-            const rawArrayStr = originalText.substring(firstP, lastP + 1);
-            const extraData = JSON.parse(rawArrayStr);
-            if (Array.isArray(extraData) && extraData.length > 0 && typeof extraData[0] === 'object' && ('nome' in extraData[0])) {
-               extraData.forEach(l => onLeadCaptured(l));
-               // Remove o texto cru arrastado pra limpar a UI
-               originalText = originalText.replace(rawArrayStr, ""); 
-            }
-         }
-      } catch(e) {
-         console.warn("Extrator Força Bruta falhou, texto não era json válido");
-      }
-    }
-    
-    // Limpeza ninja pra sumir apenas com o bloco que der match 
-    const cleanResponseText = originalText.replace(/```(?:json)?\s*\[[\s\S]*?\]\s*```/gi, "").trim();
-
-    return cleanResponseText;
-  } catch (error) {
-    console.error("Gemini API Error Detail:", error);
-    return `Ocorreu um erro ao processar. Detalhe: ${error.message}`;
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+    const result = await model.generateContent(message);
+    return result.response.text();
+  } catch (err) {
+    return `Erro no Chat: ${err.message}`;
   }
 }
 
-// ============================================
-// SISTEMA 2: ANA (OUTREACH / ABORDAGEM ATIVA)
-// ============================================
 export async function generateAnaMessage(lead, inventory) {
   try {
-    const chat = model.startChat({
-        generationConfig: { maxOutputTokens: 600, temperature: 0.8 } // Temperatura alta para máxima criatividade
-    });
-
-    const inventoryContext = JSON.stringify(inventory.map(i => ({Produto: i.name, Qtde: i.quantity, Preco: i.price})));
-    
-    const prompt = `Você é a ANA, a melhor e mais simpática vendedora da empresa. Sua especialidade é fazer "Cold Approach" (primeiro contato com clientes via WhatsApp).
-    
-    Nosso Estoque Atual:
-    ${inventoryContext}
-    
-    DADOS DO CLIENTE ALVO (Lead):
-    Nome da Loja/Pessoa: ${lead.nome}
-    Site/Infos: ${lead.site || 'Não capturado'}
-    
-    SUA MISSÃO IMEDIATA:
-    Escreva a primeira mensagem de WhatsApp que iremos mandar para ele. 
-    REGRA DE OURO 1: Você é descontraída, amigável e MUITO FÃ DE EMOJIS! (Use emojis em quase todas as frases para quebrar o gelo).
-    REGRA DE OURO 2: Se tivermos produtos relevantes no estoque para ele comprar, sutilmente cite-os usando nossa tabela de valores e puxe assunto para vender! Apele para as necessidades da loja dele.
-    REGRA DE OURO 3: Retorne APENAS o texto da mensagem nua e crua. Não use marcação e não escreva "Mensagem:", pois a resposta que você gerar será copiada e colada ipsis litteris no WhatsApp pelo nosso vendedor.
-    
-    Mande a pedrada, Ana!`;
-
-    const result = await chat.sendMessage(prompt);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const result = await model.generateContent("Oi");
     return result.response.text();
-    
-  } catch (error) {
-    console.error("Ana Generation Error: ", error);
-    return `Oooops! 🥺 A internet da Ana caiu ou deu um tilt no cerebelo dela! (${error.message})`;
+  } catch (e) { return "Erro na mensagem."; }
+}
+
+// ─── EXTRAÇÃO DE IMAGEM ──────────────────────────────────────────────────────
+export async function analyzeOrderDocument(fileBase64, inventory, customers) {
+  const b64Data = fileBase64.includes(',') ? fileBase64.split(',')[1] : fileBase64;
+  const payload = {
+    contents: [{
+      parts: [
+        { text: "Extraia os dados desta etiqueta de envio brasileira para JSON puro." },
+        { inlineData: { mimeType: "image/jpeg", data: b64Data } }
+      ]
+    }]
+  };
+  try {
+    const text = await callGeminiDirectV1beta(payload);
+    return extractJson(text);
+  } catch (e) { 
+    throw e; // Agora ele joga o erro pra tela do usuário!
+  }
+}
+
+// ─── PARSER LOCAL (EXTRAÇÃO RÁPIDA SEM API) ──────────────────────────────────
+function extractTextLocally(text) {
+  if (!text) return null;
+  const extract = (regex) => {
+    const match = text.match(regex);
+    return match ? match[1].trim() : null;
+  };
+
+  // Padrões comuns de etiquetas (Shopee, Mercado Livre, etc)
+  const customerName = extract(/Destinatário[\s\S]*?Nome:\s*(.+)/i) || extract(/Nome:\s*(.+)/i);
+  const location = extract(/Cidade\/Estado:\s*([^,\n]+)/i) || extract(/Cidade:\s*(.+)/i);
+  const cep = extract(/CEP:\s*([\d-]+)/i);
+  const address = extract(/Endereço:\s*(.+)/i);
+  const orderId = extract(/Pedido:\s*([a-zA-Z0-9-]+)/i);
+  const nf = extract(/NF:\s*(\d+)/i) || extract(/Nota Fiscal:\s*(\d+)/i);
+
+  if (customerName || orderId || cep) {
+    return {
+      customerName: customerName || null,
+      location: location || null,
+      cep: cep || null,
+      address: address || null,
+      orderId: orderId || null,
+      nf: nf || null,
+      quantity: 1
+    };
+  }
+  return null;
+}
+
+// ─── EXTRAÇÃO DE TEXTO ───────────────────────────────────────────────────────
+export async function analyzeOrderText(inputText, isCooldownActive = false) {
+  // 1. Tenta extrair localmente primeiro (Instantâneo e sem gastar a cota da API)
+  const localData = extractTextLocally(inputText);
+  if (localData && (localData.customerName || localData.orderId)) {
+    return localData;
+  }
+
+  // Se estiver em tempo de espera e não achou offline, bloqueia
+  if (isCooldownActive) {
+    throw new Error("A extração instantânea offline falhou pois o texto está fora do padrão. Aguarde o tempo acabar para usar a Inteligência Artificial novamente.");
+  }
+
+  const payload = {
+    contents: [{
+      parts: [{
+        text: `Extraia rigorosamente para JSON:
+Texto: """${inputText}"""
+
+JSON: {
+  "customerName": "Nome",
+  "location": "Cidade",
+  "cep": "00000-000",
+  "orderId": "Pedido",
+  "nf": "NF",
+  "address": "Endereço Completo",
+  "productName": "Produto"
+}`
+      }]
+    }]
+  };
+  try {
+    const text = await callGeminiDirectV1beta(payload);
+    return extractJson(text);
+  } catch (e) { 
+    throw e; // Joga o erro pra tela
+  }
+}
+
+// ─── ASSISTENTE DE DIGITAÇÃO (Texto Limpo para Cópia) ────────────────────────
+export async function formatTextForCopy(inputText) {
+  const prompt = `Aja como um assistente de digitação. 
+Lê o texto abaixo (uma etiqueta de envio) e extraia os dados essenciais.
+Retorne APENAS uma lista simples no seguinte formato (se não achar, deixe vazio):
+
+Nome: [DADO]
+Cidade: [DADO]
+CEP: [DADO]
+Pedido: [DADO]
+NF: [DADO]
+Endereco: [DADO]
+
+TEXTO:
+"""
+${inputText}
+"""`;
+
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }]
+  };
+
+  try {
+    const text = await callGeminiDirectV1beta(payload);
+    return text.trim();
+  } catch (e) {
+    console.error("DEBUG GEMINI:", e);
+    return `❌ ERRO GOOGLE: ${e.message}`;
   }
 }
