@@ -237,7 +237,13 @@ export function InventoryManager({ inventory, setInventory, transactions = [], s
   const filteredInventory = inventory
     .filter(item => {
       const q = Number(item.quantity);
-      const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase().trim());
+      
+      // Lógica de Filtro por Tokens (Permite busca fora de ordem)
+      const normalizedSearch = (searchTerm || '').normalize('NFD').replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+      const tokens = normalizedSearch.split(/\s+/).filter(t => t.length > 0);
+      const itemContent = (item.name + ' ' + item.category).normalize('NFD').replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      
+      const matchesSearch = tokens.every(token => itemContent.includes(token));
       const matchesCategory = filterCategory === '' || item.category === filterCategory;
       
       let matchesQuantity = true;

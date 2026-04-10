@@ -156,10 +156,16 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
   const normalizeText = (str) => (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 
   // Filtro de produtos em tempo real
-  const filteredProducts = inventory.filter(item => 
-    normalizeText(item.name).includes(normalizeText(productSearch)) ||
-    normalizeText(item.category).includes(normalizeText(productSearch))
-  );
+  const filteredProducts = inventory.filter(item => {
+    const normalizedSearch = normalizeText(productSearch);
+    if (!normalizedSearch) return true;
+    
+    const tokens = normalizedSearch.split(/\s+/).filter(t => t.length > 0);
+    const itemContent = normalizeText(`${item.name} ${item.category}`);
+    
+    // Verifica se todos os termos digitados existem no nome ou categoria (independente da ordem)
+    return tokens.every(token => itemContent.includes(token));
+  });
 
   const handleOrder = async (e) => {
     e.preventDefault();
@@ -290,7 +296,13 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
           addToast={addToast}
           onDataExtracted={async (dadosIA) => {
             if (dadosIA.location || dadosIA.cep) {
-              setLocationInput(dadosIA.location ? `${dadosIA.location}${dadosIA.cep ? ' - CEP: ' + dadosIA.cep : ''}` : dadosIA.cep);
+              let loc = dadosIA.location || "";
+              const cleanCep = (dadosIA.cep || "").replace(/\D/g, "");
+              if (cleanCep && !loc.includes(cleanCep)) {
+                const formattedCep = cleanCep.replace(/(\d{5})(\d{3})/, "$1-$2");
+                loc += loc ? ` - CEP: ${formattedCep}` : formattedCep;
+              }
+              setLocationInput(loc);
             }
             if (dadosIA.quantity) setQuantity(Number(dadosIA.quantity));
             if (dadosIA.productName) {
@@ -321,14 +333,19 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
               // Seleciona o melhor resultado se houver uma compatibilidade mínima (ex: pelo menos 1 palavra)
               const matchedProduct = highestScore > 0 ? bestMatch : null;
 
-              if (matchedProduct) setSelectedItem(matchedProduct.id);
-              else if (addToast) addToast(`Produto "${dadosIA.productName}" encontrado no texto, mas não no seu estoque.`, "warning");
+              if (matchedProduct) {
+                setSelectedItem(matchedProduct.id);
+                setProductSearch(matchedProduct.name);
+              } else if (addToast) {
+                addToast(`Produto "${dadosIA.productName}" não identificado no estoque.`, "warning");
+              }
             }
             if (dadosIA.orderId)   setOrderRef(dadosIA.orderId);
             if (dadosIA.address)   setFullAddress(dadosIA.address);
             if (dadosIA.bairro)    setBairro(dadosIA.bairro);
             if (dadosIA.rastreio)  setRastreio(dadosIA.rastreio);
             if (dadosIA.modalidade) setModalidade(dadosIA.modalidade);
+            if (dadosIA.nf && !orderRef) setOrderRef(`NF: ${dadosIA.nf}`);
             
             // Lógica de Autocadastro de Cliente
             if (dadosIA.customerName) {
@@ -337,7 +354,7 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
               const clienteExistente = pessoas.find(p => p.name.toLowerCase() === nomeCliente.toLowerCase());
               
               if (clienteExistente) {
-                setSelectedPessoa(clienteExistente.id);
+                setSelectedPessoa(clienteExistente.name);
                 if (addToast) addToast(`Mágica feita! Cliente já existente selecionado: ${nomeCliente}`, "success");
               } else {
                 // Cria o cliente no formato exigido pelo banco
@@ -351,7 +368,7 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
                 // Atualiza o estado da tela imediatamente
                 if (setPessoas) setPessoas(prev => [...prev, novoCliente]);
                 // Seleciona a pessoa recém criada na caixinha de opções
-                setSelectedPessoa(novoCliente.id);
+                setSelectedPessoa(novoCliente.name);
                 // Salva no banco de dados (Supabase) em segundo plano
                 await supabase.from('pessoas').insert([novoCliente]);
                 

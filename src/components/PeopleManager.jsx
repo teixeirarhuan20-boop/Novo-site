@@ -80,10 +80,17 @@ export function PeopleManager({ pessoas, setPessoas, transactions = [] }) {
     C: { label: 'C', bg: '#f1f5f9', color: '#475569', border: '#94a3b8', title: 'Cliente Bronze — Fidelização Necessária' },
   };
 
-  const filtered = enrichedPessoas.filter(p =>
-    (p.name || '').toLowerCase().includes(search.toLowerCase()) ||
-    (p.city || '').toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = useMemo(() => {
+    const normalizedSearch = (search || '').normalize('NFD').replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+    if (!normalizedSearch) return enrichedPessoas;
+
+    const tokens = normalizedSearch.split(/\s+/).filter(t => t.length > 0);
+    
+    return enrichedPessoas.filter(p => {
+      const personContent = (p.name + ' ' + (p.city || '') + ' ' + (p.contact || '')).normalize('NFD').replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      return tokens.every(token => personContent.includes(token));
+    });
+  }, [enrichedPessoas, search]);
 
   // Resumo ABC
   const abcSummary = ['A', 'B', 'C'].map(curve => {

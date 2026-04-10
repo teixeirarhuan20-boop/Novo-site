@@ -146,7 +146,11 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
           {(() => {
             const filteredItems = inventory.filter(item => {
               const q = Number(item.quantity);
-              const matchesSearch = item.name.toLowerCase().includes(searchTerm.toLowerCase().trim());
+              const normalizedSearch = searchTerm.toLowerCase().trim();
+              const tokens = normalizedSearch.split(/\s+/).filter(t => t.length > 0);
+              const itemText = (item.name + ' ' + item.category).toLowerCase();
+              const matchesSearch = tokens.every(token => itemText.includes(token));
+
               const matchesCategory = filterCategory === '' || item.category === filterCategory;
               
               let matchesQuantity = true;
