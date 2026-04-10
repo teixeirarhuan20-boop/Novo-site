@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 
-export function HistoryManager({ transactions, setTransactions }) {
+export function HistoryManager({ transactions, setTransactions, inventory, setInventory }) {
   
   const deleteTransaction = async (id) => {
     if (!window.confirm('Tem certeza que deseja excluir esta movimentação?')) return;
@@ -13,14 +13,33 @@ export function HistoryManager({ transactions, setTransactions }) {
   };
 
   const clearHistory = async () => {
-    if (!window.confirm('CUIDADO: Isso apagará TODO o histórico de movimentações permanentemente. Deseja continuar?')) return;
+    if (!window.confirm('CUIDADO: Isso apagará TODO o histórico de movimentações E ZERARÁ O ESTOQUE de todos os produtos permanentemente. Deseja continuar?')) return;
+    
+    // 1. Limpar transações localmente e no Supabase
     setTransactions([]);
-    const { error } = await supabase.from('transactions').delete().neq('id', 'temp_id_that_never_exists');
-    if (error) {
-        // Error handling
+    const { error: errorTra } = await supabase.from('transactions').delete().neq('id', 'temp_id_that_never_exists');
+    if (errorTra) {
+        console.error('Erro ao limpar transações:', errorTra.message);
+        alert('Erro ao limpar transações: ' + errorTra.message);
+        return;
     }
-    else alert('Histórico limpo com sucesso!');
+
+    // 2. Zerar estoque de todos os itens localmente e no Supabase
+    const updatedInventory = inventory.map(item => ({ ...item, quantity: 0 }));
+    setInventory(updatedInventory);
+
+    const { error: invError } = await supabase.from('inventory').update({ quantity: 0 }).neq('id', 'temp_id_that_never_exists');
+    if (invError) {
+        console.error('Erro ao zerar estoque:', invError.message);
+        alert('Erro ao zerar estoque: ' + invError.message);
+        // Se der erro no estoque, talvez seja bom tentar reverter as transações ou alertar o usuário
+        return;
+    }
+
+    alert('Histórico e estoque limpos com sucesso!');
   };
+
+
 
   if (!transactions) return <div className="inventory-panel">Carregando dados...</div>;
 

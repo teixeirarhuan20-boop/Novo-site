@@ -97,7 +97,7 @@ export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }
              onChange={(e) => setPastedText(e.target.value)}
              placeholder="...ou cole o texto da etiqueta de envio aqui (Ex: Dados da Shopee ou Mercado Livre)"
              className="inline-input"
-             style={{ flex: 1, resize: 'none', backgroundColor: 'var(--input-bg)' }}
+             style={{ flex: 1, resize: 'none', backgroundColor: 'var(--input-bg)', minHeight: '120px', color: 'var(--text-color)' }}
            />
            <button onClick={handleTextAnalyze} disabled={isProcessing || !pastedText.trim()} className="save-btn" style={{ width: '100%', padding: '0.6rem', backgroundColor: cooldown > 0 ? '#10a37f' : undefined, borderColor: cooldown > 0 ? '#10a37f' : undefined, cursor: 'pointer' }}>
               {isProcessing ? 'Filtrando...' : cooldown > 0 ? `⚡ Filtrar Offline (Instantâneo)` : '🤖 Filtrar Dados da Etiqueta'}
@@ -117,6 +117,8 @@ export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }
             <div><strong style={{ color: 'var(--text-muted)' }}>CEP:</strong><br/>{extractedData.cep || '-'}</div>
             <div><strong style={{ color: 'var(--text-muted)' }}>Pedido (Ref):</strong><br/>{extractedData.orderId || '-'}</div>
             <div><strong style={{ color: 'var(--text-muted)' }}>NF:</strong><br/>{extractedData.nf || '-'}</div>
+            <div><strong style={{ color: 'var(--text-muted)' }}>Produto Detectado:</strong><br/>{extractedData.productName || '-'}</div>
+            <div><strong style={{ color: 'var(--text-muted)' }}>Quantidade:</strong><br/>{extractedData.quantity || '1'}</div>
             <div style={{ gridColumn: '1 / -1' }}><strong style={{ color: 'var(--text-muted)' }}>Endereço Completo:</strong><br/>{extractedData.address || '-'}</div>
           </div>
           <div style={{ display: 'flex', gap: '1rem' }}>

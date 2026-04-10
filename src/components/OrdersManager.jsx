@@ -75,8 +75,8 @@ function OrdersMap({ transactions, inventory, isActive }) {
       const color = getProductColor(loc.cleanName, inventory);
       const jitter = v => v + (Math.random() - 0.5) * 0.008;
       const marker = window.L.circleMarker([jitter(loc.lat), jitter(loc.lng)], {
-        radius: 10, fillColor: color, color: '#fff',
-        weight: 2, opacity: 1, fillOpacity: 0.9,
+        radius: 12, fillColor: color, color: '#fff',
+        weight: 3, opacity: 1, fillOpacity: 0.9,
       }).addTo(mapRef.current).bindPopup(`
         <b style="color:${color}; font-size: 1rem;">${loc.cleanName}</b><br>
         <span style="color: #64748b; font-size: 0.85rem;">👤 ${t.personName || 'Cliente'}</span><br>
@@ -152,10 +152,13 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
   const [isProcessing, setIsProcessing] = useState(false);
   const [message, setMessage] = useState('');
 
+  // Função para normalizar texto (remove acentos e converte para minúsculas)
+  const normalizeText = (str) => (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
   // Filtro de produtos em tempo real
   const filteredProducts = inventory.filter(item => 
-    item.name.toLowerCase().includes(productSearch.toLowerCase()) ||
-    (item.category && item.category.toLowerCase().includes(productSearch.toLowerCase()))
+    normalizeText(item.name).includes(normalizeText(productSearch)) ||
+    normalizeText(item.category).includes(normalizeText(productSearch))
   );
 
   const handleOrder = async (e) => {
@@ -195,23 +198,23 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
 
       // 1. Geocodificação Automática (Melhorada)
       let lat = null, lng = null;
+      let cityOnly = locationInput.split('-')[0].split(',')[0].trim(); // Extrai apenas a cidade
+      
       try {
-        // Se houver algo que se parece com um CEP na string, tentamos buscar por ele primeiro
         const cepMatch = locationInput.match(/\d{5}-?\d{3}/);
         const query = cepMatch ? cepMatch[0] : locationInput;
         
-        const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=br&limit=1`);
+        const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=br&limit=1`, {
+          headers: { 'User-Agent': 'MeuNegocioCRM/1.0' }
+        });
         const data = await response.json();
         if (data && data.length > 0) {
           lat = data[0].lat;
           lng = data[0].lon;
-        } else if (cepMatch) {
-          // Fallback se o CEP falhar, tenta a string original (cidade)
-          const resp2 = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(locationInput)}&countrycodes=br&limit=1`);
-          const d2 = await resp2.json();
-          if (d2 && d2.length > 0) {
-            lat = d2[0].lat;
-            lng = d2[0].lon;
+          // Se buscou por CEP, tenta pegar a cidade real do retorno do Nominatim
+          if (data[0].display_name) {
+            const parts = data[0].display_name.split(',');
+            if (parts.length > 0) cityOnly = parts[0].trim();
           }
         }
       } catch (err) {
@@ -219,16 +222,16 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
       }
 
       // 2. Preparar "Smart String" para o mapa
-      // Formato: NomeProduto ||Cidade;Lat;Lng;OrderID;NF;CEP;Endereco;Bairro;Rastreio;Modalidade||
-      const packedItemName = `${item.name} ||${locationInput};${lat};${lng};${orderRef};;${locationInput.match(/\d{5}-?\d{3}/)?.[0] || ''};${fullAddress};${bairro};${rastreio};${modalidade}||`;
+      const packedItemName = `${item.name} ||${cityOnly};${lat};${lng};${orderRef};;${locationInput.match(/\d{5}-?\d{3}/)?.[0] || ''};${fullAddress};${bairro};${rastreio};${modalidade}||`;
       const newQuantity = Number(item.quantity) - Number(quantity);
 
-      // 3. Registrar Transação
+      // 3. Registrar Transação (Salvando 'city' separadamente para o histórico)
       const newTransaction = {
         id: Date.now().toString() + Math.random().toString(),
         type: 'saída',
         itemId: item.id,
         itemName: packedItemName,
+        city: cityOnly, // <--- CAMPO CIDADE PARA O HISTÓRICO
         quantity: quantity,
         unitPrice: item.price,
         totalValue: item.price * quantity,
@@ -289,7 +292,38 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
             if (dadosIA.location || dadosIA.cep) {
               setLocationInput(dadosIA.location ? `${dadosIA.location}${dadosIA.cep ? ' - CEP: ' + dadosIA.cep : ''}` : dadosIA.cep);
             }
-            if (dadosIA.quantity)  setQuantity(dadosIA.quantity);
+            if (dadosIA.quantity) setQuantity(Number(dadosIA.quantity));
+            if (dadosIA.productName) {
+              const searchName = normalizeText(dadosIA.productName);
+              setProductSearch(dadosIA.productName);
+              
+              // Lógica de Busca Aproximada (Fuzzy Match por Tokens)
+              const searchTokens = searchName.split(/\s+/).filter(t => t.length > 1);
+              let bestMatch = null;
+              let highestScore = 0;
+
+              inventory.forEach(item => {
+                const itemName = normalizeText(item.name);
+                const itemTokens = itemName.split(/\s+/);
+                let score = 0;
+
+                // Pontua se a palavra da etiqueta estiver contida no nome do produto
+                searchTokens.forEach(token => {
+                  if (itemName.includes(token)) score++;
+                });
+
+                if (score > highestScore) {
+                  highestScore = score;
+                  bestMatch = item;
+                }
+              });
+
+              // Seleciona o melhor resultado se houver uma compatibilidade mínima (ex: pelo menos 1 palavra)
+              const matchedProduct = highestScore > 0 ? bestMatch : null;
+
+              if (matchedProduct) setSelectedItem(matchedProduct.id);
+              else if (addToast) addToast(`Produto "${dadosIA.productName}" encontrado no texto, mas não no seu estoque.`, "warning");
+            }
             if (dadosIA.orderId)   setOrderRef(dadosIA.orderId);
             if (dadosIA.address)   setFullAddress(dadosIA.address);
             if (dadosIA.bairro)    setBairro(dadosIA.bairro);

@@ -35,7 +35,10 @@ function extractJson(text) {
         remetente: obj.remetente || obj.sender || null,
         quantity: Number(obj.quantity || obj.qtd || obj.quantidade || 1),
         productId: obj.productId || obj.product_id || null,
-        customerId: obj.customerId || obj.customer_id || null
+        customerId: obj.customerId || obj.customer_id || null,
+        email: obj.email || null,
+        telefone: obj.telefone || obj.phone || null,
+        orderType: obj.orderType || null
       };
     } catch (e) {
       console.error("Erro no parse de JSON extraído:", e, rawJson);
@@ -82,11 +85,78 @@ async function callGeminiDirectV1beta(payload) {
 }
 
 // ─── CHAT COM VENDEDORA ───────────────────────────────────────────────────────
-export async function sendMessageToGemini(history, message, inventory, onLeadCaptured) {
+export async function sendMessageToGemini(chatHistory, currentMessage, inventory, onLeadCaptured, onOrderPlaced) {
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const result = await model.generateContent(message);
-    return result.response.text();
+
+    // Prepare chat history for Gemini API
+    let geminiHistory = chatHistory.map(msg => ({
+      role: msg.role === 'bot' ? 'model' : 'user', // Gemini uses 'model' for bot
+      parts: [{ text: msg.text }]
+    }));
+
+    // O SDK do Gemini exige que o histórico comece obrigatoriamente com um 'user'.
+    // Removemos saudações iniciais do bot do histórico enviado à API.
+    const firstUserIndex = geminiHistory.findIndex(m => m.role === 'user');
+    geminiHistory = firstUserIndex !== -1 ? geminiHistory.slice(firstUserIndex) : [];
+
+    // Construct inventory list for the AI to reference
+    const inventoryList = inventory.map(item =>
+      `- ${item.name} (Categoria: ${item.category}, Estoque: ${item.quantity}, Preço: R$${Number(item.price).toFixed(2)})`
+    ).join('\n');
+
+    // System instruction for the AI
+    const systemInstruction = `Você é uma vendedora virtual amigável e prestativa.
+Seu objetivo é ajudar o cliente com dúvidas sobre produtos, verificar estoque, preços e, se possível, coletar informações para um novo lead ou registrar um pedido.
+
+Você tem acesso ao seguinte inventário de produtos:
+${inventoryList}
+
+Se o cliente expressar uma intenção clara de COMPRAR um produto específico com uma QUANTIDADE (ex: "Quero 2 unidades do Monitor Dell 24 para João Silva em São Paulo"), responda APENAS com um JSON válido no seguinte formato e NADA MAIS. Use 'null' para campos não encontrados:
+{
+  "orderType": "order",
+  "customerName": "Nome completo do cliente",
+  "productName": "Nome do produto de interesse",
+  "quantity": "Quantidade desejada (número)",
+  "location": "Cidade/Estado do cliente",
+  "cep": "CEP do cliente (se fornecido)",
+  "address": "Endereço completo do cliente (se fornecido)",
+  "bairro": "Bairro do cliente (se fornecido)",
+  "orderId": "Referência do pedido (se fornecida)",
+  "nf": "Número da NF (se fornecida)",
+  "rastreio": "Código de rastreio (se fornecido)",
+  "modalidade": "Modalidade de envio (se fornecida)"
+}
+
+Se o cliente fornecer informações como nome, email, telefone, ou expressar interesse em um produto que possa ser um lead (mas sem intenção clara de compra imediata), responda APENAS com um JSON válido no seguinte formato e NADA MAIS. Use 'null' para campos não encontrados:
+{
+  "customerName": "Nome completo do cliente",
+  "email": "Email do cliente",
+  "telefone": "Telefone do cliente (apenas números)",
+  "productName": "Nome do produto de interesse",
+  "quantity": "Quantidade desejada (número)",
+  "location": "Cidade/Estado do cliente"
+}
+
+Caso contrário, responda de forma natural e conversacional, usando as informações do inventário para ajudar o cliente. Mantenha as respostas concisas e úteis.`;
+
+    const chat = model.startChat({ history: geminiHistory });
+    const result = await chat.sendMessage(systemInstruction + "\n\nCliente: " + currentMessage);
+    const botResponseText = result.response.text();
+
+    const extractedData = extractJson(botResponseText);
+
+    if (extractedData && extractedData.orderType === 'order' && extractedData.productName && extractedData.quantity > 0) {
+      // Handle order placement
+      onOrderPlaced(extractedData);
+      return `Pedido de ${extractedData.quantity}x ${extractedData.productName} para ${extractedData.customerName} em ${extractedData.location} registrado!`;
+    } else if (extractedData && extractedData.customerName) {
+      // Passa o objeto completo para o App.jsx, que já espera customerName, email, etc.
+      onLeadCaptured(extractedData);
+      return "Obrigada! Anotei seus dados e em breve entraremos em contato. Como posso ajudar mais?";
+    } else {
+      return botResponseText;
+    }
   } catch (err) {
     return `Erro no Chat: ${err.message}`;
   }
@@ -95,8 +165,28 @@ export async function sendMessageToGemini(history, message, inventory, onLeadCap
 export async function generateAnaMessage(lead, inventory) {
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const result = await model.generateContent("Oi");
-    return result.response.text();
+
+    const inventoryList = inventory.map(item =>
+      `- ${item.name} (Categoria: ${item.category}, Estoque: ${item.quantity}, Preço: R$${Number(item.price).toFixed(2)})`
+    ).join('\n');
+
+    const prompt = `Você é a Ana, uma assistente de vendas proativa.
+Sua tarefa é criar uma mensagem de abordagem inicial para um lead, focando em um produto de interesse (se houver) e incentivando o contato.
+O lead é:
+Nome: ${lead.nome || 'Não informado'}
+Email: ${lead.email || 'Não informado'}
+Telefone: ${lead.telefone || 'Não informado'}
+
+Inventário disponível para referência:
+${inventoryList}
+
+Crie uma mensagem curta e amigável, com no máximo 3 frases, para ser enviada via WhatsApp.
+Exemplo: "Olá [Nome do Lead]! Vi seu interesse em [Produto]. Temos ótimas opções e posso te ajudar a escolher. Que tal conversarmos?"
+
+Mensagem para ${lead.nome}:`;
+
+    const result = await model.generateContent(prompt);
+    return result.response.text().trim();
   } catch (e) { return "Erro na mensagem."; }
 }
 
@@ -152,9 +242,25 @@ function extractTextLocally(text) {
       address = address.replace(/,\s*$/, '').trim();
   }
 
+  // Extração de Produto e Quantidade (Suporta: "Produto: X Quantidade: Y" ou "Produto: X \n Y")
+  let productName = extract(/Produto:\s*\n?\s*(.+?)(?:\s*Quantidade:|\n|$)/i);
+  let quantityText = extract(/Quantidade:\s*(\d+)/i);
+  let quantity = quantityText ? Number(quantityText) : 1;
+
+  // Fallback para o formato antigo (ex: "Produto X, e quantidade Ex: 2")
+  if (!productName) {
+  const productLine = text.split('\n').find(line => line.toLowerCase().includes(', e quantidade'));
+  if (productLine) {
+    const parts = productLine.split(/,\s*e quantidade/i);
+    productName = parts[0].trim();
+    const qtyMatch = parts[1].match(/\d+/);
+    if (qtyMatch) quantity = Number(qtyMatch[0]);
+  }
+  }
+
   // Verifica se algum dado essencial foi extraído para considerar a extração local bem-sucedida
-  if (customerName || orderId || cep || rastreio || location || address || bairro) {
-    return { customerName, location, cep, address, orderId, nf, rastreio, bairro, modalidade, quantity: 1 };
+  if (customerName || orderId || cep || rastreio || location || address || bairro || productName) {
+    return { customerName, location, cep, address, orderId, nf, rastreio, bairro, modalidade, productName, quantity };
   }
   return null;
 }
@@ -177,6 +283,7 @@ export async function analyzeOrderText(inputText, isCooldownActive = false) {
       parts: [{
         text: `Você é um extrator de dados de etiquetas de envio brasileiras.
 Leia o texto abaixo e extraia TODOS os campos disponíveis.
+Se encontrar o nome de um produto e uma quantidade no texto (ex: "Produto X, quantidade 2" ou apenas o nome do produto próximo aos dados), extraia também.
 
 Retorne APENAS um JSON válido com esta estrutura (use null para campos não encontrados):
 {
@@ -190,7 +297,8 @@ Retorne APENAS um JSON válido com esta estrutura (use null para campos não enc
   "rastreio": "Código de rastreio completo (ex: BR2641257085334)",
   "modalidade": "Modalidade de envio (ex: COLETA, PAC, SEDEX)",
   "remetente": "Nome do remetente/loja",
-  "productName": null
+  "productName": "Nome do produto encontrado",
+  "quantity": 1
 }
 
 TEXTO DA ETIQUETA:

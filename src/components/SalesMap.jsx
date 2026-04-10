@@ -76,7 +76,17 @@ export function SalesMap({ transactions = [], inventory = [], isActive = false }
     return null;
   };
 
-  const applyJitter = (coord) => coord + (Math.random() - 0.5) * 0.01;
+  const applyJitter = (coord, id = '0') => {
+    // Jitter determinístico baseado no ID para evitar que os pontos "pulem" ao atualizar
+    let hash = 0;
+    const str = String(id);
+    for (let i = 0; i < str.length; i++) {
+      hash = (hash << 5) - hash + str.charCodeAt(i);
+      hash |= 0;
+    }
+    const offset = ((Math.abs(hash) % 100) / 100 - 0.5) * 0.005;
+    return coord + offset;
+  };
 
   const colorPalette = ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#7c3aed', '#0891b2', '#db2777', '#4b5563'];
   const getProductColor = (productName) => {
@@ -153,48 +163,76 @@ export function SalesMap({ transactions = [], inventory = [], isActive = false }
   useEffect(() => {
     if (!mapInstanceRef.current || !window.L) return;
 
-
+    // Limpa camadas anteriores
+    if (clusterGroupRef.current) mapInstanceRef.current.removeLayer(clusterGroupRef.current);
+    if (heatLayerRef.current) mapInstanceRef.current.removeLayer(heatLayerRef.current);
     markersRef.current.forEach(m => mapInstanceRef.current.removeLayer(m));
     markersRef.current = [];
 
+    const heatPoints = [];
+    const clusterGroup = window.L.markerClusterGroup ? window.L.markerClusterGroup() : null;
+    
     let count = 0;
     filteredTransactions.forEach(t => {
       const loc = unpackLocation(t.itemName);
       if (loc && loc.lat && loc.lng && !isNaN(loc.lat) && !isNaN(loc.lng)) {
         count++;
         const color = getProductColor(loc.cleanName);
-        const finalLat = applyJitter(loc.lat);
-        const finalLng = applyJitter(loc.lng);
+        const finalLat = applyJitter(loc.lat, t.id);
+        const finalLng = applyJitter(loc.lng, t.id);
 
+        // Define o marcador (Pin colorido mais visível)
         const marker = window.L.circleMarker([finalLat, finalLng], {
-          radius: 10,
+          radius: 12, 
           fillColor: color,
-          color: '#fff',
-          weight: 2,
+          color: '#ffffff',
+          weight: 3, 
           opacity: 1,
           fillOpacity: 0.9,
-          className: 'static-marker'
-        }).addTo(mapInstanceRef.current)
-          .bindPopup(`
-            <div style="font-family: inherit;">
-              <b style="font-size: 1rem;">${loc.cleanName}</b><br/>
-              <span style="color: #64748b; font-size: 0.85rem;">👤 ${t.personName || 'Cliente'}</span><br/>
-              <hr style="margin: 5px 0; border: 0; border-top: 1px solid #eee;" />
-              <span style="font-size: 0.85rem;">📍 ${loc.city}</span><br/>
-              <b style="color: #16a34a;">R$ ${Number(t.totalValue).toFixed(2)}</b>
-            </div>
-          `);
-        markersRef.current.push(marker);
+          className: 'static-marker' // Removido pulse-marker para parar de balançar
+        }).bindPopup(`
+          <div style="font-family: inherit; min-width: 150px;">
+            <b style="font-size: 1.1rem; color: ${color};">${loc.cleanName}</b><br/>
+            <span style="color: #64748b; font-size: 0.85rem;">👤 ${t.personName || 'Cliente'}</span><br/>
+            <hr style="margin: 8px 0; border: 0; border-top: 1px solid #e2e8f0;" />
+            <span style="font-size: 0.9rem;">📍 ${loc.city || 'Localização'}</span><br/>
+            <b style="color: #16a34a; font-size: 1rem;">R$ ${Number(t.totalValue).toFixed(2)}</b>
+          </div>
+        `);
+
+        if (mapMode === 'pins') {
+          marker.addTo(mapInstanceRef.current);
+          markersRef.current.push(marker);
+        } else if (mapMode === 'cluster' && clusterGroup) {
+          clusterGroup.addLayer(marker);
+        }
+        
+        heatPoints.push([finalLat, finalLng, 0.5]);
       }
     });
 
+    // Adiciona a camada correta dependendo do modo
+    if (mapMode === 'cluster' && clusterGroup) {
+      mapInstanceRef.current.addLayer(clusterGroup);
+      clusterGroupRef.current = clusterGroup;
+    } else if (mapMode === 'heat' && window.L.heatLayer) {
+      const heat = window.L.heatLayer(heatPoints, { radius: 25, blur: 15, maxZoom: 10 }).addTo(mapInstanceRef.current);
+      heatLayerRef.current = heat;
+    }
+
     setMappedCount(count);
 
-    if (markersRef.current.length > 0) {
-      const group = new window.L.featureGroup(markersRef.current);
-      mapInstanceRef.current.fitBounds(group.getBounds().pad(0.3));
+    // Ajusta o zoom para os pontos
+    if (count > 0) {
+      const bounds = mapMode === 'cluster' ? clusterGroup.getBounds() : (mapMode === 'heat' ? window.L.latLngBounds(heatPoints.map(p => [p[0], p[1]])) : window.L.featureGroup(markersRef.current).getBounds());
+      if (bounds.isValid()) {
+        mapInstanceRef.current.fitBounds(bounds.pad(0.3));
+      }
     }
-  }, [filteredTransactions]);
+    
+    // Corrige tamanho
+    setTimeout(() => mapInstanceRef.current?.invalidateSize(), 200);
+  }, [filteredTransactions, mapMode]);
 
   return (
     <div className="inventory-panel" style={{ background: '#f8fafc' }}>

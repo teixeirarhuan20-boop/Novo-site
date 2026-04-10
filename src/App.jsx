@@ -50,6 +50,16 @@ function App() {
           );
         }
 
+        // 0.1 Verifica se a coluna 'city' existe nas transações
+        const { error: cityCheckError } = await supabase.from('transactions').select('city').limit(1);
+        if (cityCheckError && cityCheckError.message.includes('city')) {
+          console.warn('Coluna city não existe no transactions. Adicione via SQL Editor.');
+          addToast(
+            '⚠️ Execute no Supabase SQL Editor: ALTER TABLE transactions ADD COLUMN city text;',
+            'error'
+          );
+        }
+
         // 1. Estoque — cor agora vem direto do Supabase
         const { data: inv, error: invErr } = await supabase.from('inventory').select('*');
         if (invErr) throw invErr;
@@ -130,17 +140,93 @@ function App() {
     setMessages([...newMessages, { role: 'bot', text: '...' }]);
     setIsLoading(true);
 
-    const botResponse = await sendMessageToGemini(messages, text, inventory, (novosDados) => {
-       const leadRecemCriado = {
-         id: Date.now().toString() + Math.random().toString(),
-         nome: novosDados.nome || '',
-         email: novosDados.email || '',
-         telefone: novosDados.telefone || '',
-         site: novosDados.site || '',
-         data: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
-       };
-       setLeads(prev => [...prev, leadRecemCriado]);
-    });
+    const botResponse = await sendMessageToGemini(
+      messages,
+      text,
+      inventory,
+      (novosDados) => { // onLeadCaptured
+        const leadRecemCriado = {
+          id: Date.now().toString() + Math.random().toString(),
+          nome: novosDados.customerName || '',
+          email: novosDados.email || '',
+          telefone: novosDados.telefone || '',
+          site: novosDados.site || '', // Assuming 'site' might come from somewhere else or be null
+          data: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
+        };
+        setLeads(prev => [...prev, leadRecemCriado]);
+        addToast(`Novo lead capturado: ${leadRecemCriado.nome}`, 'success');
+      },
+      async (orderData) => { // onOrderPlaced
+        try {
+          const item = inventory.find(i => (i.name || '').toLowerCase() === (orderData.productName || '').toLowerCase());
+          if (!item) {
+            addToast(`Produto "${orderData.productName}" não encontrado no estoque.`, 'error');
+            return;
+          }
+
+          if (item.quantity < orderData.quantity) {
+            addToast(`Estoque insuficiente para "${item.productName}". Disponível: ${item.quantity}`, 'error');
+            return;
+          }
+
+          let pessoa = pessoas.find(p => p.name.toLowerCase() === orderData.customerName.toLowerCase());
+          if (!pessoa) {
+            // Auto-cadastro de cliente
+            pessoa = {
+              id: Date.now().toString() + Math.random().toString(),
+              name: orderData.customerName.trim(),
+              document: '',
+              role: 'cliente',
+              contact: orderData.telefone || orderData.email || ''
+            };
+            setPessoas(prev => [...prev, pessoa]);
+            await supabase.from('pessoas').insert([pessoa]);
+            addToast(`Novo cliente cadastrado automaticamente: ${pessoa.name}`, "success");
+          }
+
+          // Geocodificação (simplificada para o exemplo, idealmente usaria a mesma lógica do OrdersManager)
+          let lat = null, lng = null;
+          if (orderData.location) {
+            try {
+              const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(orderData.location)}&countrycodes=br&limit=1`);
+              const data = await response.json();
+              if (data && data.length > 0) {
+                lat = data[0].lat;
+                lng = data[0].lon;
+              }
+            } catch (err) {
+              console.error('Erro na geocodificação via IA:', err);
+            }
+          }
+
+          const packedItemName = `${item.name} ||${orderData.location || 'Desconhecido'};${lat};${lng};${orderData.orderId || ''};${orderData.nf || ''};${orderData.cep || ''};${orderData.address || ''};${orderData.bairro || ''};${orderData.rastreio || ''};${orderData.modalidade || ''}||`;
+          const newQuantity = Number(item.quantity) - Number(orderData.quantity);
+
+          const newTransaction = {
+            id: Date.now().toString() + Math.random().toString(),
+            type: 'saída',
+            itemId: item.id,
+            itemName: packedItemName,
+            city: orderData.location ? orderData.location.split(',')[0].trim() : 'Desconhecido',
+            quantity: orderData.quantity,
+            unitPrice: item.price,
+            totalValue: item.price * orderData.quantity,
+            personName: pessoa.name,
+            date: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
+          };
+
+          await supabase.from('inventory').update({ quantity: newQuantity }).eq('id', item.id);
+          await supabase.from('transactions').insert([newTransaction]);
+
+          setInventory(prev => prev.map(i => i.id === item.id ? { ...i, quantity: newQuantity } : i));
+          setTransactions(prev => [...prev, newTransaction]);
+          addToast(`Pedido de ${orderData.quantity}x ${item.name} para ${pessoa.name} registrado!`, 'success');
+        } catch (error) {
+          console.error('Erro ao processar pedido via IA:', error);
+          addToast(`Erro ao registrar pedido via IA: ${error.message}`, 'error');
+        }
+      }
+    );
 
     setMessages([...newMessages, { role: 'bot', text: botResponse }]);
     setIsLoading(false);
@@ -207,7 +293,7 @@ function App() {
          </div>
          
          <div style={{ display: activeTab === 'historico' ? 'block' : 'none', height: '100%' }}>
-            <HistoryManager transactions={transactions} setTransactions={setTransactions} />
+            <HistoryManager transactions={transactions} setTransactions={setTransactions} inventory={inventory} setInventory={setInventory} />
          </div>
          
          <div style={{ display: activeTab === 'pessoas' ? 'block' : 'none', height: '100%' }}>
