@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 const groqApiKey = import.meta.env.VITE_GROQ_API_KEY;
-const genAI = new GoogleGenerativeAI(apiKey);
+const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 
 // ─── UTILITÁRIO GLOBAL: extrator de JSON ─────────────────────────────────────
 function extractJson(text) {
@@ -123,6 +123,7 @@ async function callGeminiDirectV1beta(payload) {
 
 // ─── CHAT COM VENDEDORA ───────────────────────────────────────────────────────
 export async function sendMessageToGemini(chatHistory, currentMessage, inventory, onLeadCaptured, onOrderPlaced) {
+  if (!genAI) return "Chat indisponível (chave Gemini não configurada).";
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
@@ -200,6 +201,7 @@ Caso contrário, responda de forma natural e conversacional, usando as informaç
 }
 
 export async function generateAnaMessage(lead, inventory) {
+  if (!genAI) return "Mensagem indisponível.";
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
