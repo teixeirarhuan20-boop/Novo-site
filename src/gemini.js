@@ -228,6 +228,37 @@ Mensagem para ${lead.nome}:`;
 }
 
 // ─── EXTRAÇÃO DE IMAGEM ──────────────────────────────────────────────────────
+async function callGroqVisionDirect(promptText, base64Image, mimeType) {
+  if (!groqApiKey) throw new Error("Chave da Groq não configurada.");
+  
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${groqApiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "llama-3.2-90b-vision-preview", // Modelo de visão nativo do Groq
+      temperature: 0.1,
+      messages: [{ 
+        role: "user", 
+        content: [
+          { type: "text", text: promptText },
+          { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64Image}` } }
+        ]
+      }]
+    })
+  });
+  
+  const data = await response.json();
+  if (!response.ok) {
+    if (response.status === 429) throw new Error("LIMITE_EXCEDIDO");
+    throw new Error(`Groq Vision Erro: ${data.error?.message || response.statusText}`);
+  }
+  
+  return data.choices[0].message.content;
+}
+
 export async function analyzeOrderDocument(fileBase64, inventory, customers) {
   const b64Data = fileBase64.includes(',') ? fileBase64.split(',')[1] : fileBase64;
   
@@ -239,24 +270,39 @@ export async function analyzeOrderDocument(fileBase64, inventory, customers) {
   const inventoryContext = inventory?.slice(0, 40).map(i => i.name).join(' | ') || 'Vazio';
   const customerContext = customers?.slice(0, 40).map(c => c.name).join(' | ') || 'Vazio';
 
-  const payload = {
-    contents: [{
-      parts: [
-        { text: `Aja como um scanner de etiquetas logísticas brasileiras. 
+  const promptText = `Aja como um scanner de etiquetas logísticas brasileiras. 
         Extraia as informações para JSON.
         
-        REFERÊNCIAS (Se a leitura estiver borrada, use estas listas para corrigir):
+        REFERÊNCIAS:
         PRODUTOS: ${inventoryContext}
         CLIENTES: ${customerContext}
 
         Campos Obrigatórios: customerName, location, cep, address, bairro, orderId, nf, rastreio, modalidade, productName, quantity.
-        Retorne APENAS o JSON puro.` },
+        Retorne APENAS um objeto JSON puro.`;
+
+  // Se tiver Chave Groq, tenta usar a visão hiper-rápida do Llama 3.2 
+  if (groqApiKey) {
+     try {
+       console.log("👁️ Acionando Groq Vision (LLaMA 3.2 90B)...");
+       const groqResponse = await callGroqVisionDirect(promptText, b64Data, mimeType);
+       return extractJson(groqResponse);
+     } catch (e) {
+       console.warn("Groq Vision falhou, caindo para Gemini...", e.message);
+       // Continua para o Gemini se a Groq engasgar (fallback do fallback)
+     }
+  }
+
+  const payload = {
+    contents: [{
+      parts: [
+        { text: promptText },
         { inlineData: { mimeType: mimeType, data: b64Data } }
       ]
     }]
   };
 
   try {
+    console.log("👁️ Acionando Gemini Vision (Google AI)...");
     const text = await callGeminiDirectV1beta(payload);
     return extractJson(text);
   } catch (e) {
