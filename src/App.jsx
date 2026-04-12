@@ -242,11 +242,11 @@ function App() {
      setActiveTab('abordagem'); 
   };
 
-  // Verificação de Variáveis de Ambiente (Vercel/Local)
+  // Verificação de Variáveis de Ambiente (Vercel/Local) — Groq é opcional, não bloqueia o app
   if (!supabase || !import.meta.env.VITE_GEMINI_API_KEY) {
     return (
-      <div style={{ 
-        height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', 
+      <div style={{
+        height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center',
         justifyContent: 'center', textAlign: 'center', padding: '2rem', backgroundColor: '#0f172a', color: 'white', fontFamily: 'sans-serif'
       }}>
         <div style={{ background: '#1e293b', padding: '2.5rem', borderRadius: '1.5rem', border: '1px solid #334155', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)', maxWidth: '450px' }}>
