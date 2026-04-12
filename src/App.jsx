@@ -16,6 +16,40 @@ import { supabase } from './lib/supabase';
 import './index.css';
 
 function App() {
+  if (!supabase) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', backgroundColor: '#0f172a', color: '#f8fafc', fontFamily: 'system-ui, -apple-system, sans-serif', textAlign: 'center', padding: '2rem' }}>
+        <div style={{ maxWidth: '600px', backgroundColor: '#1e293b', padding: '3rem', borderRadius: '1rem', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)', border: '1px solid #334155' }}>
+          <h1 style={{ color: '#ef4444', marginBottom: '1rem', fontSize: '2rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
+            ⚠️ ERRO DE CONFIGURAÇÃO
+          </h1>
+          <p style={{ fontSize: '1.1rem', marginBottom: '1.5rem', lineHeight: '1.6', color: '#e2e8f0' }}>
+            As variáveis de ambiente do <strong>Supabase</strong> não foram encontradas. Seu app parou para evitar quebrar silenciosamente (Tela Branca).
+          </p>
+          <div style={{ backgroundColor: '#0f172a', padding: '1.5rem', borderRadius: '0.75rem', textAlign: 'left', marginBottom: '1.5rem', border: '1px solid #334155' }}>
+            <h3 style={{ marginTop: 0, color: '#38bdf8', marginBottom: '1rem' }}>Como resolver na Vercel:</h3>
+            <ol style={{ lineHeight: '1.8', paddingLeft: '1.2rem', margin: 0, color: '#cbd5e1' }}>
+              <li>Acesse seu painel da <strong>Vercel</strong> e abra o projeto.</li>
+              <li>Vá em <strong>Settings</strong> &gt; <strong>Environment Variables</strong>.</li>
+              <li>Copie do seu arquivo <code style={{ backgroundColor: '#1e293b', padding: '0.2rem 0.4rem', borderRadius: '0.25rem', color: '#f8fafc' }}>.env</code> local e adicione lá:
+                <ul style={{ listStyle: 'none', padding: 0, marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                  <li>🔑 <code style={{ color: '#a78bfa' }}>VITE_SUPABASE_URL</code></li>
+                  <li>🔑 <code style={{ color: '#a78bfa' }}>VITE_SUPABASE_ANON_KEY</code></li>
+                  <li>🔑 <code style={{ color: '#a78bfa' }}>VITE_GEMINI_API_KEY</code></li>
+                  <li>🔑 <code style={{ color: '#a78bfa' }}>VITE_GROQ_API_KEY</code></li>
+                </ul>
+              </li>
+              <li style={{ marginTop: '0.5rem' }}>Vá em <strong>Deployments</strong> e clique em <strong>Redeploy</strong>.</li>
+            </ol>
+          </div>
+          <p style={{ color: '#94a3b8', fontSize: '0.9rem', margin: 0 }}>
+            <em>Dica: O arquivo .env fica no seu PC por segurança e não sobe pro GitHub.</em>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   const [activeTab, setActiveTab] = useState('dashboard'); 
   const [uiMode, setUiMode] = useState('pro'); // 'pro' ou 'classic'
   
