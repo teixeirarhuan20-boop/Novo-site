@@ -1,6 +1,17 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
-import jsQR from 'jsqr'
 import { supabase } from '../lib/supabase'
+
+// ─── Carrega jsQR via CDN (evita dependência npm) ────────────────────────────
+function loadJsQR() {
+  return new Promise((resolve) => {
+    if (window.jsQR) { resolve(window.jsQR); return }
+    const script = document.createElement('script')
+    script.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js'
+    script.onload = () => resolve(window.jsQR)
+    script.onerror = () => resolve(null)
+    document.head.appendChild(script)
+  })
+}
 import { generateId, formatDate, normalizeText, formatCurrency } from '../utils/formatting'
 import { geocode, packLocation } from '../utils/location'
 
@@ -65,7 +76,8 @@ export function QRCodeManager({ inventory, setInventory, transactions, setTransa
   const startCamera = useCallback(async () => {
     setScannerOpen(true)
     setScanning(true)
-    setScanMsg('Iniciando câmera...')
+    setScanMsg('Carregando scanner...')
+    await loadJsQR()
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
       streamRef.current = stream
@@ -94,7 +106,7 @@ export function QRCodeManager({ inventory, setInventory, transactions, setTransa
     const ctx = canvas.getContext('2d')
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-    const code = jsQR(imageData.data, imageData.width, imageData.height)
+    const code = window.jsQR?.(imageData.data, imageData.width, imageData.height)
     if (code) {
       handleQRDecoded(code.data)
     } else {
@@ -114,9 +126,10 @@ export function QRCodeManager({ inventory, setInventory, transactions, setTransa
   useEffect(() => () => stopCamera(), [stopCamera])
 
   // ── Leitura via upload de imagem ──────────────────────────────────────────
-  const handleFileUpload = useCallback((e) => {
+  const handleFileUpload = useCallback(async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
+    await loadJsQR()
     const reader = new FileReader()
     reader.onload = (ev) => {
       const img = new Image()
@@ -127,7 +140,7 @@ export function QRCodeManager({ inventory, setInventory, transactions, setTransa
         const ctx = canvas.getContext('2d')
         ctx.drawImage(img, 0, 0)
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-        const code = jsQR(imageData.data, imageData.width, imageData.height)
+        const code = window.jsQR?.(imageData.data, imageData.width, imageData.height)
         if (code) {
           handleQRDecoded(code.data)
         } else {
