@@ -6,6 +6,7 @@ const NAV = [
   { id: 'mapa',      icon: '🗺️', label: 'Mapa de Vendas' },
   { section: 'OPERAÇÃO' },
   { id: 'pedidos',   icon: '🛒', label: 'Pedidos' },
+  { id: 'qrcodes',   icon: '🏷️', label: 'QR Codes' },
   { id: 'entrada',   icon: '🔁', label: 'Movimentações' },
   { section: 'GESTÃO' },
   { id: 'estoque',   icon: '📦', label: 'Estoque' },

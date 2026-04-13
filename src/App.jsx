@@ -20,6 +20,7 @@ import { SalesMap }          from './components/SalesMap'
 import { SystemLogManager }  from './components/SystemLogManager'
 import { LeadsManager }      from './components/LeadsManager'
 import { OutreachManager }   from './components/OutreachManager'
+import { QRCodeManager }     from './components/QRCodeManager'
 import './index.css'
 
 // ─── Verificação de configuração ────────────────────────────────────────────
@@ -186,6 +187,7 @@ export default function App() {
       case 'dashboard': return <Dashboard inventory={inventory} transactions={transactions} />
       case 'mapa':      return <SalesMap  inventory={inventory} transactions={transactions} isActive={activeTab === 'mapa'} />
       case 'pedidos':   return <OrdersManager {...props} isActive={activeTab === 'pedidos'} />
+      case 'qrcodes':   return <QRCodeManager {...props} />
       case 'entrada':   return <StockInManager {...props} />
       case 'estoque':   return <InventoryManager {...props} />
       case 'pessoas':   return <PeopleManager {...props} />
