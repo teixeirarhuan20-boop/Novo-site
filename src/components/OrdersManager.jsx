@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { LabelAssistant } from './LabelAssistant'
+import { BatchScanner } from './BatchScanner'
 import { geocode, packLocation, unpackLocation, getProductColor, jitter } from '../utils/location'
 import { generateId, formatDate, normalizeText, formatCurrency } from '../utils/formatting'
 
@@ -58,6 +59,7 @@ function OrdersMap({ transactions, inventory }) {
 }
 
 export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, transactions, setTransactions, addToast, isActive }) {
+  const [pageTab,        setPageTab]        = useState('form') // 'form' | 'batch'
   const [productSearch,  setProductSearch]  = useState('')
   const [selectedItem,   setSelectedItem]   = useState('')
   const [selectedPessoa, setSelectedPessoa] = useState('')
@@ -187,13 +189,38 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
     }
   }, [selectedItem, selectedPessoa, quantity, location, address, bairro, orderRef, rastreio, modalidade, inventory, pessoas, setPessoas, setInventory, setTransactions, addToast])
 
+  const sharedProps = { inventory, setInventory, transactions, setTransactions, pessoas, setPessoas, addToast }
+
   return (
     <div className="page">
       <div className="page-header">
-        <h1>🛒 Novo Pedido</h1>
+        <h1>🛒 Pedidos</h1>
         <p>Registre vendas com baixa automática no estoque e geolocalização</p>
       </div>
 
+      {/* Abas principais da página */}
+      <div className="flex gap-1 mb-3">
+        <button
+          className={`btn ${pageTab === 'form' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setPageTab('form')}
+        >
+          📝 Formulário Manual
+        </button>
+        <button
+          className={`btn ${pageTab === 'batch' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setPageTab('batch')}
+        >
+          📷 Scanner em Lote
+        </button>
+      </div>
+
+      {/* ── Aba Scanner em Lote ── */}
+      {pageTab === 'batch' && (
+        <BatchScanner {...sharedProps} />
+      )}
+
+      {/* ── Aba Formulário ── */}
+      {pageTab === 'form' && (
       <div className="card" style={{ maxWidth: 680 }}>
         <LabelAssistant inventory={inventory} pessoas={pessoas} addToast={addToast} onDataExtracted={handleLabelData} />
         <hr className="divider" />
@@ -267,6 +294,7 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
           </button>
         </form>
       </div>
+      )}
 
       {/* Últimas vendas */}
       <div className="mt-3">
