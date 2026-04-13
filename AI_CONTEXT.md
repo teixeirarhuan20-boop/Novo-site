@@ -164,3 +164,25 @@ npm run build -- --outDir /caminho/fora/do/dist
 **Arquivos alterados:** `package.json`
 
 **⚠️ Atenção para IAs futuras:** Nunca adicione pacotes `@esbuild/linux-*` ou `@rollup/rollup-linux-*` como dependências diretas no `package.json`. Eles são instalados automaticamente pelo npm como `optionalDependencies` de acordo com a plataforma do usuário.
+
+---
+
+### [2026-04-13] — Correção da extração do nome do cliente nas etiquetas
+
+**Problema reportado:** Campo "Cliente" extraindo fragmentos sem sentido (ex: "o E") em vez do nome real (ex: "Gabriela Milz Macedo Macruz"). Cidade, bairro e rastreio eventualmente vindo errados também.
+
+**Causa raiz:**
+1. O prompt enviado para a IA era genérico demais — não descrevia a estrutura visual da etiqueta Shopee, então a IA não sabia exatamente onde procurar o nome do destinatário.
+2. Sem validação: mesmo que a IA retornasse um fragmento curto ("o E"), o sistema aceitava como nome válido.
+
+**Fixes aplicados em `src/lib/gemini.js`:**
+
+1. **Prompt reescrito em `analyzeDocument`:** Agora descreve explicitamente a estrutura de uma etiqueta Shopee (seção DESTINATÁRIO no topo → nome → endereço → bairro/CEP/pedido → código de rota → código de barras rastreio → seção REMETENTE = ignorar). Com exemplo visual de cada campo.
+
+2. **Função `isValidName()` adicionada:** Valida antes de aceitar o nome — precisa ter mínimo 4 caracteres e conter pelo menos uma letra. Rejeita fragmentos como "o E", "SP2", "BR2" etc.
+
+3. **`normalizeExtracted` atualizado:** Passa o nome candidato por `isValidName()` antes de atribuir. Se falhar, retorna `null` (o formulário fica em branco em vez de preencher errado).
+
+**Arquivos alterados:** `src/lib/gemini.js`
+
+**Build:** ✅ Rebuild feito em `/tmp/vite-build` (os `node_modules` do Windows na pasta original têm permissão somente-leitura no Linux). Copiado para `dist/assets/index-yK4IWDvU.js`.

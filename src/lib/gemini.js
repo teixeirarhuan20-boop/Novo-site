@@ -7,10 +7,18 @@ const genAI = geminiKey ? new GoogleGenerativeAI(geminiKey) : null
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+// Valida se parece um nome real (mínimo 4 chars, tem pelo menos uma letra, não é só sigla/fragmento)
+function isValidName(name) {
+  if (!name || typeof name !== 'string') return false
+  const trimmed = name.trim()
+  return trimmed.length >= 4 && /[a-záéíóúãõâêîôûàèìòùç]/i.test(trimmed)
+}
+
 function normalizeExtracted(obj) {
   if (!obj || typeof obj !== 'object') return null
+  const rawName = obj.customerName || obj.customer_name || obj.cliente || obj.destinatario || null
   return {
-    customerName: obj.customerName || obj.customer_name || obj.cliente || obj.destinatario || null,
+    customerName: isValidName(rawName) ? rawName.trim() : null,
     productName:  obj.productName  || obj.product_name  || obj.produto   || null,
     location:     obj.location     || obj.city          || obj.cidade    || null,
     cep:          obj.cep          || obj.postal_code   || null,
@@ -248,26 +256,33 @@ export async function analyzeDocument(fileBase64, inventory, customers) {
 
   const inventoryCtx = inventory?.slice(0, 40).map(i => i.name).join(' | ') || 'Vazio'
 
-  const prompt = `Você é um scanner especializado em etiquetas logísticas brasileiras (Shopee, Mercado Livre, Correios).
+  const prompt = `Você é um scanner especializado em etiquetas logísticas brasileiras da Shopee, Mercado Livre e Correios.
 
-Analise a imagem da etiqueta e retorne APENAS um JSON puro, sem markdown, sem explicações.
+ESTRUTURA TÍPICA DE UMA ETIQUETA SHOPEE (de cima para baixo):
+1. Cabeçalho "DESTINATÁRIO" (em negrito/caixa) → logo abaixo: NOME COMPLETO do cliente (ex: "Gabriela Milz Macedo Macruz")
+2. Endereço do destinatário (Rua, número, complemento, cidade, estado)
+3. Campos: Bairro, CEP, Pedido
+4. QR codes e código de rota em destaque (ex: "SP2-2", "LSP-16")
+5. Código de barras longo = código de rastreio (começa com BR, JT, LB...)
+6. Cabeçalho "REMETENTE" → nome do vendedor — IGNORAR ESTE NOME
+7. Campos: NF, DANFE
 
-ATENÇÃO — regras obrigatórias:
-- customerName: nome do DESTINATÁRIO (seção "DESTINATÁRIO" na etiqueta). NÃO use o nome do remetente.
+REGRAS OBRIGATÓRIAS:
+- customerName: nome COMPLETO logo abaixo do cabeçalho "DESTINATÁRIO". É sempre um nome de pessoa (ex: "Gabriela Milz Macedo Macruz"). NUNCA use o nome do remetente/vendedor.
 - address: SOMENTE rua + número + complemento (ex: "Rua Canário, 80, Apto 101 Flamboyant"). Sem cidade, sem estado.
-- bairro: bairro do destinatário (campo "Bairro:" na etiqueta)
-- cep: CEP do destinatário com traço (campo "CEP:" na etiqueta). Ex: "04521-000"
-- location: SOMENTE nome da cidade do destinatário. Ex: "São Paulo"
-- orderId: código do pedido (campo "Pedido:" na etiqueta). Ex: "260410FB4GUR2T"
-- nf: número da nota fiscal (campo "NF:" na etiqueta). Ex: "1795"
-- rastreio: código de rastreio (código de barras longo, começa com BR, JT, LB etc). Ex: "BR2614237586381"
-- modalidade: código de rota (ex: "SP2-2", "LSP-16", "SEDEX", "PAC")
-- productName: identifique se algum produto abaixo combina com o conteúdo, ou retorne null
+- bairro: bairro do destinatário (campo "Bairro:"). Ex: "Moema"
+- cep: CEP do destinatário com traço (campo "CEP:"). Ex: "04521-000"
+- location: SOMENTE o nome da cidade do destinatário. Ex: "São Paulo"
+- orderId: código alfanumérico do pedido (campo "Pedido:"). Ex: "260410FB4GUR2T"
+- nf: número da nota fiscal (campo "NF:" no rodapé). Ex: "1795"
+- rastreio: código de barras longo embaixo da etiqueta (começa com BR, JT, LB). Ex: "BR261423758638I"
+- modalidade: código de rota em destaque na caixa preta/cinza (ex: "SP2-2", "LSP-16", "SEDEX", "PAC", "COLETA")
+- productName: identifique se algum produto abaixo combina com o conteúdo da etiqueta, ou retorne null
 - quantity: quantidade, padrão 1
 
 PRODUTOS CADASTRADOS: ${inventoryCtx}
 
-Formato de retorno (APENAS este JSON):
+Retorne APENAS este JSON (sem markdown, sem explicações):
 {"customerName":"...","address":"...","bairro":"...","cep":"...","location":"...","orderId":"...","nf":"...","rastreio":"...","modalidade":"...","productName":null,"quantity":1}`
 
   // Verifica se o resultado tem pelo menos algum campo útil
