@@ -1,0 +1,248 @@
+import React, { useState } from 'react';
+import { supabase } from '../lib/supabase';
+
+export function StockInManager({ inventory, setInventory, pessoas, transactions, setTransactions }) {
+  // Estado local para armazenar a quantidade e pessoa selecionada para cada item da lista
+  const [actions, setActions] = useState({});
+
+  // Estados para Filtros
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterCategory, setFilterCategory] = useState('');
+  const [filterQuantity, setFilterQuantity] = useState('all'); // 'all', 'in_stock', 'low_stock', 'out_stock'
+
+  const handleActionChange = (itemId, field, value) => {
+    setActions(prev => ({
+      ...prev,
+      [itemId]: {
+        ...prev[itemId],
+        [field]: value
+      }
+    }));
+  };
+
+  const handleTransaction = (item, type) => {
+    const itemAction = actions[item.id] || {};
+    const quantity = Number(itemAction.quantity || 0);
+    const pessoaId = itemAction.pessoaId || '';
+
+    if (quantity <= 0) return;
+
+    if (type === 'saida' && quantity > item.quantity) {
+      alert(`Erro: Quantidade de saída (${quantity}) maior que o saldo em estoque (${item.quantity}).`);
+      return;
+    }
+
+    const pessoa = pessoas.find(p => p.id === pessoaId);
+    const locationInput = itemAction.location || '';
+
+    // Função interna para geo-codificação automática
+    const getCoordinates = async (query) => {
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ', Brazil')}`);
+        const data = await res.json();
+        if (data && data.length > 0) return { lat: data[0].lat, lng: data[0].lon };
+      } catch (e) { /* ignore */ }
+      return { lat: null, lng: null };
+    };
+
+    const processTransaction = async () => {
+        let lat = null, lng = null;
+        if (type === 'saida' && locationInput) {
+            const coords = await getCoordinates(locationInput);
+            lat = coords.lat;
+            lng = coords.lng;
+        }
+
+        // Atualiza estoque
+        const newQuantity = type === 'entrada' ? item.quantity + quantity : item.quantity - quantity;
+        setInventory(prev => prev.map(i => {
+          if (i.id === item.id) return { ...i, quantity: newQuantity };
+          return i;
+        }));
+
+        // REGISTRO "INTELIGENTE" (Empacota localização no nome no formato ||cidade;lat;lng||)
+        const locationData = locationInput ? `||${locationInput};${lat};${lng}||` : "";
+        const packedItemName = type === 'saida' ? `${item.name} ${locationData}` : item.name;
+
+        // Registra transação
+        const newTransaction = {
+          id: Date.now().toString() + Math.random().toString(),
+          type: type,
+          itemId: item.id,
+          itemName: packedItemName,
+          city: locationInput ? locationInput.split(',')[0].trim() : '',
+          quantity: quantity,
+          unitPrice: item.price,
+          totalValue: item.price * quantity,
+          personName: pessoa ? pessoa.name : '',
+          date: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
+        };
+
+        setTransactions(prev => [...prev, newTransaction]);
+
+        // Sincroniza Supabase
+        const { error: invError } = await supabase.from('inventory').update({ quantity: newQuantity }).eq('id', item.id);
+        const { error: traError } = await supabase.from('transactions').insert([newTransaction]);
+        
+        if (invError || traError) {
+            // Error handling
+        }
+
+        // Limpa os campos
+        setActions(prev => ({ ...prev, [item.id]: { quantity: '', pessoaId: '', location: '' } }));
+        alert(`Sucesso! ${type === 'entrada' ? 'Entrada' : 'Saída'} de ${quantity} un. de ${item.name} registrada.`);
+    };
+
+    processTransaction();
+  };
+
+  return (
+    <div className="inventory-panel">
+      <h1>🔁 Gestão de Movimentações</h1>
+      <p style={{marginBottom: '1rem', color: '#8e8e8e'}}>
+        Entradas de estoque, ajustes técnicos e reposições manuais de produtos.
+      </p>
+
+      {/* Barra de Filtros */}
+      <div className="filters-bar" style={{ marginBottom: '1.5rem' }}>
+        <div className="filter-group" style={{ flex: 1 }}>
+          <input 
+            type="text" 
+            placeholder="🔍 Encontrar produto pelo nome..." 
+            value={searchTerm} 
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="filter-input"
+          />
+        </div>
+        <div className="filter-group" style={{ width: '250px' }}>
+          <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="filter-select">
+            <option value="">📂 Todas Categorias</option>
+            {[...new Set(inventory.map(item => item.category))].map(cat => (
+              <option key={cat} value={cat}>{cat}</option>
+            ))}
+          </select>
+        </div>
+        <div className="filter-group" style={{ width: '200px' }}>
+          <select value={filterQuantity} onChange={(e) => setFilterQuantity(e.target.value)} className="filter-select">
+            <option value="all">📦 Todos Níveis</option>
+            <option value="in_stock">✅ Em Estoque</option>
+            <option value="low_stock">⚠️ Estoque Baixo (&lt; 5)</option>
+            <option value="out_stock">❌ Sem Estoque</option>
+          </select>
+        </div>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Produto</th>
+            <th>Estoque Atual</th>
+            <th>Quantidade</th>
+            <th>Pessoa (Opcional)</th>
+            <th>Ação</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(() => {
+            const filteredItems = inventory.filter(item => {
+              const q = Number(item.quantity);
+              const normalizedSearch = searchTerm.toLowerCase().trim();
+              const tokens = normalizedSearch.split(/\s+/).filter(t => t.length > 0);
+              const itemText = (item.name + ' ' + item.category).toLowerCase();
+              const matchesSearch = tokens.every(token => itemText.includes(token));
+
+              const matchesCategory = filterCategory === '' || item.category === filterCategory;
+              
+              let matchesQuantity = true;
+              if (filterQuantity === 'in_stock') matchesQuantity = q > 0;
+              else if (filterQuantity === 'out_stock') matchesQuantity = q === 0;
+              else if (filterQuantity === 'low_stock') matchesQuantity = q > 0 && q < 5;
+              
+              return matchesSearch && matchesCategory && matchesQuantity;
+            });
+
+            if (filteredItems.length === 0) {
+              return (
+                <tr>
+                  <td colSpan="5" style={{ textAlign: 'center', padding: '2rem', color: '#8e8e8e' }}>Nenhum produto encontrado.</td>
+                </tr>
+              );
+            }
+
+            return filteredItems.map((item) => {
+              const itemAction = actions[item.id] || { quantity: '', pessoaId: '' };
+              return (
+                <tr key={item.id}>
+                  <td style={{ fontWeight: 500 }}>{item.name}</td>
+                  <td>
+                    <span style={{
+                      backgroundColor: item.quantity > 0 ? 'rgba(76, 175, 80, 0.1)' : 'rgba(244, 67, 54, 0.1)',
+                      color: item.quantity > 0 ? '#4CAF50' : '#F44336',
+                      padding: '0.2rem 0.6rem',
+                      borderRadius: '12px',
+                      fontWeight: 'bold'
+                    }}>
+                      {item.quantity} un.
+                    </span>
+                  </td>
+                  <td>
+                    <input 
+                      type="number" 
+                      value={itemAction.quantity} 
+                      onChange={(e) => handleActionChange(item.id, 'quantity', e.target.value)} 
+                      placeholder="Qtd." 
+                      min="1"
+                      className="inline-input"
+                      style={{ width: '80px', margin: 0 }}
+                    />
+                  </td>
+                  <td>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                        <select 
+                        value={itemAction.pessoaId} 
+                        onChange={(e) => handleActionChange(item.id, 'pessoaId', e.target.value)}
+                        className="inline-input"
+                        style={{ margin: 0, width: '150px' }}
+                        >
+                        <option value="">-- Ninguém --</option>
+                        {pessoas.map(p => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                        </select>
+                        <input 
+                        type="text" 
+                        placeholder="Local (Cidade/CEP)" 
+                        value={itemAction.location || ''} 
+                        onChange={(e) => handleActionChange(item.id, 'location', e.target.value)}
+                        className="inline-input"
+                        style={{ margin: 0, width: '150px', fontSize: '0.8rem' }}
+                        />
+                    </div>
+                  </td>
+                  <td>
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <button 
+                        onClick={() => handleTransaction(item, 'entrada')} 
+                        className="save-btn" 
+                        style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
+                      >
+                         + Entrada
+                      </button>
+                      <button 
+                        onClick={() => handleTransaction(item, 'saida')} 
+                        className="delete-btn" 
+                        style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
+                      >
+                         - Saída
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            });
+          })()}
+        </tbody>
+      </table>
+    </div>
+  );
+}
