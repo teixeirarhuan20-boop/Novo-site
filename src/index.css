@@ -657,13 +657,211 @@ tbody tr:hover { background: var(--surface-2); }
   margin: 1.25rem 0;
 }
 
-/* ─── Responsividade básica ────────────────────────────────────────────────── */
+/* ─── Mobile Header ────────────────────────────────────────────────────────── */
+.mobile-header {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 54px;
+  background: var(--sidebar-bg);
+  z-index: 150;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  flex-shrink: 0;
+}
+
+.mobile-logo {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #f1f5f9;
+  letter-spacing: 0.3px;
+}
+.mobile-logo span { color: #60a5fa; }
+
+.hamburger {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 1.4rem;
+  cursor: pointer;
+  padding: 0.4rem;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s, background 0.15s;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+}
+.hamburger:hover { color: #f1f5f9; background: rgba(255,255,255,0.08); }
+
+.mobile-chat-btn {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 1.3rem;
+  cursor: pointer;
+  padding: 0.4rem;
+  border-radius: var(--radius-sm);
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+}
+.mobile-chat-btn:hover { color: #f1f5f9; }
+
+/* ─── Sidebar Overlay (mobile) ─────────────────────────────────────────────── */
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 190;
+  animation: fadeIn 0.2s ease;
+}
+.sidebar-overlay.open { display: block; }
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ─── Responsividade Completa ──────────────────────────────────────────────── */
+
+/* ── Tablet ─────────────────────────────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  :root { --sidebar-w: 210px; }
+  .page { padding: 1.5rem; }
+}
+
+/* ── Mobile ─────────────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
-  :root { --sidebar-w: 0px; }
-  .sidebar { display: none; }
+  :root { --sidebar-w: 270px; }
+
+  /* Layout base */
+  .app-layout {
+    flex-direction: column;
+  }
+
+  /* Mobile header aparece */
+  .mobile-header { display: flex; }
+
+  /* Main content empurrado pra baixo do header fixo */
+  .main-content {
+    padding-top: 54px;
+    width: 100vw;
+  }
+
+  /* Sidebar vira drawer deslizante */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: var(--sidebar-w);
+    transform: translateX(-100%);
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 200;
+    box-shadow: 4px 0 24px rgba(0,0,0,0.35);
+  }
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  /* Botão de fechar dentro da sidebar no mobile */
+  .sidebar-close-btn {
+    display: flex !important;
+  }
+
+  /* Página */
   .page { padding: 1rem; }
-  .stat-grid { grid-template-columns: repeat(2, 1fr); }
-  .form-row { flex-direction: column; }
+  .page-header { margin-bottom: 1.25rem; }
+  .page-header h1 { font-size: 1.25rem; }
+
+  /* Stats em 2 colunas */
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.65rem;
+  }
+  .stat-card { padding: 1rem; }
+  .stat-card .stat-value { font-size: 1.35rem; }
+
+  /* Formulários */
+  .form-row { flex-direction: column; gap: 0.65rem; }
+  .form-group { min-width: unset; }
+
+  /* Cards */
+  .card { padding: 1rem; border-radius: var(--radius); }
+
+  /* Botões maiores para toque */
+  .btn { padding: 0.65rem 1rem; min-height: 42px; }
+  .btn-sm { padding: 0.45rem 0.75rem; min-height: 36px; }
+  .btn-lg { padding: 0.85rem 1.25rem; min-height: 50px; font-size: 1rem; }
+
+  /* Inputs maiores */
+  input, select, textarea {
+    padding: 0.65rem 0.75rem;
+    font-size: 1rem; /* evita zoom automático no iOS */
+    min-height: 44px;
+  }
+  textarea { min-height: unset; }
+
+  /* Tabelas com scroll horizontal */
+  .table-wrap { border-radius: var(--radius); }
+  table { min-width: 480px; font-size: 0.82rem; }
+  thead th { padding: 0.65rem 0.75rem; }
+  tbody td  { padding: 0.7rem 0.75rem; }
+
+  /* Filtros */
+  .filters { gap: 0.5rem; }
+  .filters .search-input { min-width: 100%; }
+
+  /* Drop zone menor */
+  .drop-zone { padding: 1.25rem 1rem; }
+  .drop-zone-icon { font-size: 1.5rem; }
+
+  /* Chat: tela cheia no mobile */
+  .chat-fab {
+    bottom: 1rem;
+    right: 1rem;
+    padding: 0.75rem 1.1rem;
+    font-size: 0.88rem;
+  }
+  .chat-panel {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100dvh;
+    border-radius: 0;
+    bottom: 0; right: 0;
+  }
+
+  /* Toast no topo no mobile (evita conflito com teclado) */
+  .toast-container {
+    bottom: auto;
+    top: 62px;
+    right: 0.75rem;
+    left: 0.75rem;
+    align-items: stretch;
+  }
+  .toast { max-width: 100%; }
+
+  /* Mapa menor */
+  .map-container { height: 260px !important; }
+
+  /* Abas */
+  .flex.gap-1 { flex-wrap: wrap; }
+}
+
+/* ── Telas muito pequenas (≤ 375px) ───────────────────────────────────────── */
+@media (max-width: 375px) {
+  .page { padding: 0.75rem; }
+  .stat-grid { grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+  .stat-card .stat-value { font-size: 1.15rem; }
+  .page-header h1 { font-size: 1.1rem; }
 }
 
 /* ─── Curva ABCD ───────────────────────────────────────────────────────────── */

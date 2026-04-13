@@ -30,7 +30,8 @@ const isConfigured =
   Boolean(import.meta.env.VITE_GEMINI_API_KEY)
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('dashboard')
+  const [activeTab,  setActiveTab]  = useState('dashboard')
+  const [menuOpen,   setMenuOpen]   = useState(false)
   const { toasts, addToast, removeToast } = useToast()
 
   // ── Estado global ──────────────────────────────────────────────────────────
@@ -201,13 +202,30 @@ export default function App() {
 
   return (
     <div className="app-layout">
-      <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+
+      {/* ── Header mobile (hamburger + logo + chat) ── */}
+      <header className="mobile-header">
+        <button className="hamburger" onClick={() => setMenuOpen(true)} aria-label="Abrir menu">
+          ☰
+        </button>
+        <span className="mobile-logo">MEU NEGÓCIO <span>PRO</span></span>
+        <button className="mobile-chat-btn" onClick={() => setChatOpen(o => !o)} aria-label="Chat Luna">
+          💬
+        </button>
+      </header>
+
+      <Sidebar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        isOpen={menuOpen}
+        onClose={() => setMenuOpen(false)}
+      />
 
       <main className="main-content">
         {renderTab()}
       </main>
 
-      {/* Chat flutuante */}
+      {/* Chat flutuante (desktop) */}
       {!chatOpen && (
         <button className="chat-fab" onClick={() => setChatOpen(true)}>
           💬 Luna
