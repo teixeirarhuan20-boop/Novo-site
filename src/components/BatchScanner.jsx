@@ -516,6 +516,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       ))
 
       if (data?.customerName || data?.cep || data?.location) {
+        playBeep()
         addToast(`✅ Etiqueta lida: ${data.customerName || data.location}`, 'success')
       } else {
         addToast('⚠️ Dados não extraídos. Selecione o produto manualmente.', 'warning')
