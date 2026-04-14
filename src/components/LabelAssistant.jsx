@@ -14,18 +14,34 @@ function loadJsQR() {
   })
 }
 
+// ─── Pré-processamento de contraste para melhor leitura ──────────────────────
+function applyContrast(canvas, factor = 1.6) {
+  const ctx = canvas.getContext('2d')
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const data = imageData.data
+  const intercept = 128 * (1 - factor)
+  for (let i = 0; i < data.length; i += 4) {
+    data[i]     = Math.max(0, Math.min(255, data[i]     * factor + intercept))
+    data[i + 1] = Math.max(0, Math.min(255, data[i + 1] * factor + intercept))
+    data[i + 2] = Math.max(0, Math.min(255, data[i + 2] * factor + intercept))
+  }
+  ctx.putImageData(imageData, 0, 0)
+}
+
 export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }) {
   const [status,        setStatus]        = useState('')
   const [dragging,      setDragging]      = useState(false)
   const [textInput,     setTextInput]     = useState('')
   const [formatted,     setFormatted]     = useState('')
   const [extractedData, setExtractedData] = useState(null)
-  const [tab,           setTab]           = useState('image') // 'image' | 'text' | 'qr'
+  const [tab,           setTab]           = useState('image') // 'image' | 'text' | 'camera'
 
-  // ── Estado do scanner QR ──────────────────────────────────────────────────
-  const [scanning,   setScanning]   = useState(false)
-  const [scanMsg,    setScanMsg]    = useState('Aponte a câmera para o QR Code da etiqueta')
-  const [qrDetected, setQrDetected] = useState(false)
+  // ── Estado da câmera ──────────────────────────────────────────────────────
+  const [cameraMode,  setCameraMode]  = useState('dados')   // 'dados' | 'qr'
+  const [scanning,    setScanning]    = useState(false)
+  const [camMsg,      setCamMsg]      = useState('')
+  const [qrDetected,  setQrDetected]  = useState(false)
+  const [capturing,   setCapturing]   = useState(false)     // processando foto
 
   const inputRef   = useRef(null)
   const videoRef   = useRef(null)
@@ -33,17 +49,30 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
   const streamRef  = useRef(null)
   const rafRef     = useRef(null)
 
-  // Para câmera quando muda de aba
+  // Para câmera quando muda de aba principal
   useEffect(() => {
-    if (tab !== 'qr') stopCamera()
+    if (tab !== 'camera') stopCamera()
   }, [tab])
 
+  // Para câmera ao desmontar
   useEffect(() => () => stopCamera(), [])
+
+  // Reinicia mensagem ao mudar modo
+  useEffect(() => {
+    if (!scanning) return
+    if (cameraMode === 'dados') {
+      cancelAnimationFrame(rafRef.current)
+      setCamMsg('Aponte a câmera para a etiqueta e toque em "📸 Capturar"')
+    } else {
+      setCamMsg('Aponte a câmera para o QR Code da etiqueta')
+      rafRef.current = requestAnimationFrame(scanFrame)
+    }
+  }, [cameraMode])
 
   // ── Processamento de imagem (aba Imagem) ─────────────────────────────────
   const processFile = useCallback(async (file) => {
     if (!file) return
-    setStatus('🔍 Lendo imagem com OCR...')
+    setStatus('🔍 Lendo imagem com IA...')
     setFormatted('')
 
     try {
@@ -127,12 +156,15 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
     if (file) processFile(file)
   }, [processFile])
 
-  // ── Scanner QR: inicia câmera ─────────────────────────────────────────────
+  // ── Câmera: inicia ────────────────────────────────────────────────────────
   const startCamera = useCallback(async () => {
     setScanning(true)
     setQrDetected(false)
-    setScanMsg('Carregando scanner...')
-    await loadJsQR()
+    setCapturing(false)
+    setCamMsg('Carregando câmera...')
+
+    if (cameraMode === 'qr') await loadJsQR()
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
@@ -141,16 +173,21 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
       if (videoRef.current) {
         videoRef.current.srcObject = stream
         await videoRef.current.play()
-        setScanMsg('✅ Aponte para o QR Code da etiqueta')
-        rafRef.current = requestAnimationFrame(scanFrame)
+
+        if (cameraMode === 'dados') {
+          setCamMsg('Aponte a câmera para a etiqueta e toque em "📸 Capturar"')
+        } else {
+          setCamMsg('Aponte para o QR Code da etiqueta')
+          rafRef.current = requestAnimationFrame(scanFrame)
+        }
       }
     } catch {
-      setScanMsg('❌ Câmera não disponível. Use "Carregar Imagem" abaixo.')
+      setCamMsg('❌ Câmera não disponível. Use "Carregar Arquivo" abaixo.')
       setScanning(false)
     }
-  }, [])
+  }, [cameraMode])
 
-  // ── Scanner QR: para câmera ───────────────────────────────────────────────
+  // ── Câmera: para ─────────────────────────────────────────────────────────
   const stopCamera = useCallback(() => {
     cancelAnimationFrame(rafRef.current)
     if (streamRef.current) {
@@ -160,7 +197,48 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
     setScanning(false)
   }, [])
 
-  // ── Scanner QR: loop de frames ────────────────────────────────────────────
+  // ── Câmera: captura foto (modo Dados) ─────────────────────────────────────
+  const capturePhoto = useCallback(async () => {
+    const video  = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || !canvas) return
+
+    setCapturing(true)
+    setCamMsg('📸 Foto capturada! Extraindo dados com IA...')
+    stopCamera()
+
+    canvas.width  = video.videoWidth  || 640
+    canvas.height = video.videoHeight || 480
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(video, 0, 0)
+    applyContrast(canvas, 1.5)
+
+    const b64 = canvas.toDataURL('image/jpeg', 0.92)
+
+    try {
+      setStatus('🤖 Gemini Vision lendo a etiqueta...')
+      const data = await analyzeDocument(b64, inventory, pessoas)
+
+      if (data) {
+        onDataExtracted(data)
+        setExtractedData(data)
+        addToast('✅ Dados extraídos da etiqueta!', 'success')
+        setStatus('✅ Dados extraídos!')
+        setCamMsg('✅ Pronto! Formulário preenchido.')
+      } else {
+        addToast('IA não identificou os dados. Tente a aba "Imagem / Foto".', 'warning')
+        setStatus('⚠️ Não identificou campos. Tente Imagem / Foto.')
+        setCamMsg('⚠️ Tente centralizar melhor a etiqueta.')
+      }
+    } catch (err) {
+      addToast(`Erro: ${err.message}`, 'error')
+      setStatus(`❌ ${err.message}`)
+      setCamMsg('❌ Erro ao processar. Tente novamente.')
+    }
+    setCapturing(false)
+  }, [inventory, pessoas, stopCamera, onDataExtracted, addToast])
+
+  // ── Câmera: scan loop QR ──────────────────────────────────────────────────
   const scanFrame = useCallback(() => {
     const video  = videoRef.current
     const canvas = canvasRef.current
@@ -183,12 +261,12 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
     }
   }, [])
 
-  // ── Scanner QR: upload de imagem ──────────────────────────────────────────
+  // ── Câmera: upload de arquivo QR ─────────────────────────────────────────
   const handleQRImageUpload = useCallback(async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
     await loadJsQR()
-    setScanMsg('🔍 Analisando imagem...')
+    setCamMsg('🔍 Analisando imagem...')
     const reader = new FileReader()
     reader.onload = (ev) => {
       const img = new Image()
@@ -203,7 +281,7 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
         if (code?.data) {
           handleQRDecoded(code.data)
         } else {
-          setScanMsg('❌ QR Code não encontrado na imagem.')
+          setCamMsg('❌ QR Code não encontrado na imagem.')
           addToast('QR Code não encontrado na imagem.', 'warning')
         }
       }
@@ -213,33 +291,28 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
     e.target.value = ''
   }, [])
 
-  // ── Scanner QR: processa texto decodificado ───────────────────────────────
+  // ── Câmera: processa QR decodificado ─────────────────────────────────────
   const handleQRDecoded = useCallback(async (rawData) => {
     stopCamera()
     setQrDetected(true)
-    setScanMsg(`✅ QR lido! Extraindo dados com IA...`)
+    setCamMsg('✅ QR lido! Extraindo dados com IA...')
     setStatus('🤖 Analisando QR Code com IA...')
 
     try {
-      // Tenta parse como JSON do nosso próprio sistema (QRCodeManager)
       let data = null
       try {
         const parsed = JSON.parse(rawData)
         if (parsed.id && parsed.name) {
-          // QR do nosso sistema — produto identificado diretamente
           const product = inventory.find(p => p.id === parsed.id || p.name === parsed.name)
           if (product) {
             data = { productName: product.name }
-            setScanMsg(`✅ Produto identificado: ${product.name}`)
+            setCamMsg(`✅ Produto identificado: ${product.name}`)
           }
         }
-      } catch {
-        // Não é JSON — é texto da etiqueta (Shopee, Correios, etc.)
-      }
+      } catch { /* não é JSON */ }
 
-      // Se não resolveu como JSON, manda pro Gemini interpretar
       if (!data) {
-        setScanMsg('🤖 Interpretando QR com IA...')
+        setCamMsg('🤖 Interpretando QR com IA...')
         data = await analyzeText(rawData, inventory, pessoas)
       }
 
@@ -248,18 +321,16 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
         setExtractedData(data)
         addToast('✅ QR Code lido e dados extraídos!', 'success')
         setStatus('✅ Dados extraídos do QR Code!')
-        setScanMsg('✅ Pronto! Formulário preenchido abaixo.')
+        setCamMsg('✅ Pronto! Formulário preenchido.')
       } else {
-        // Mesmo sem campos identificados, mostra o conteúdo bruto
         setTextInput(rawData)
         setTab('text')
         addToast('QR lido — revise os dados na aba Texto.', 'info')
-        setScanMsg('⚠️ Dados não identificados. Verifique a aba Texto.')
+        setCamMsg('⚠️ Dados não identificados. Verifique a aba Texto.')
       }
     } catch (err) {
       addToast(`Erro ao processar QR: ${err.message}`, 'error')
       setStatus(`❌ ${err.message}`)
-      // Fallback: joga o conteúdo na aba de texto
       setTextInput(rawData)
       setTab('text')
     }
@@ -269,7 +340,7 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
   return (
     <div style={{ marginBottom: '1.5rem' }}>
 
-      {/* Abas */}
+      {/* Abas principais */}
       <div className="flex gap-1 mb-2">
         <button
           className={`btn btn-sm ${tab === 'image' ? 'btn-primary' : 'btn-secondary'}`}
@@ -278,10 +349,10 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
           🖼️ Imagem / Foto
         </button>
         <button
-          className={`btn btn-sm ${tab === 'qr' ? 'btn-primary' : 'btn-secondary'}`}
-          onClick={() => setTab('qr')}
+          className={`btn btn-sm ${tab === 'camera' ? 'btn-primary' : 'btn-secondary'}`}
+          onClick={() => setTab('camera')}
         >
-          📷 QR Code
+          📷 Câmera
         </button>
         <button
           className={`btn btn-sm ${tab === 'text' ? 'btn-primary' : 'btn-secondary'}`}
@@ -291,7 +362,7 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
         </button>
       </div>
 
-      {/* ── Aba Imagem ── */}
+      {/* ── Aba Imagem (upload) ── */}
       {tab === 'image' && (
         <div
           className={`drop-zone ${dragging ? 'dragging' : ''}`}
@@ -308,89 +379,182 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
         </div>
       )}
 
-      {/* ── Aba QR Code ── */}
-      {tab === 'qr' && (
+      {/* ── Aba Câmera ── */}
+      {tab === 'camera' && (
         <div>
+
+          {/* Seletor de modo: Dados / QR Code */}
+          <div style={{
+            display: 'flex', gap: '0.5rem', marginBottom: '0.75rem',
+            background: 'var(--surface-2)', borderRadius: 'var(--radius)', padding: '0.25rem',
+          }}>
+            <button
+              onClick={() => { if (cameraMode !== 'dados') { setCameraMode('dados'); setQrDetected(false) } }}
+              style={{
+                flex: 1, padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-sm)',
+                border: 'none', cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem',
+                transition: 'all 0.18s',
+                background: cameraMode === 'dados' ? 'var(--primary)' : 'transparent',
+                color: cameraMode === 'dados' ? '#fff' : 'var(--text-muted)',
+              }}
+            >
+              📸 Dados
+            </button>
+            <button
+              onClick={() => { if (cameraMode !== 'qr') { setCameraMode('qr'); setQrDetected(false) } }}
+              style={{
+                flex: 1, padding: '0.5rem 0.75rem', borderRadius: 'var(--radius-sm)',
+                border: 'none', cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem',
+                transition: 'all 0.18s',
+                background: cameraMode === 'qr' ? 'var(--primary)' : 'transparent',
+                color: cameraMode === 'qr' ? '#fff' : 'var(--text-muted)',
+              }}
+            >
+              📷 QR Code
+            </button>
+          </div>
+
           {/* Área de vídeo */}
           <div style={{
             position: 'relative', borderRadius: 'var(--radius)', overflow: 'hidden',
-            background: '#0f172a', aspectRatio: '4/3', maxHeight: 340,
+            background: '#0f172a', aspectRatio: '4/3', maxHeight: 320,
           }}>
-            <video ref={videoRef} style={{ width: '100%', height: '100%', objectFit: 'cover', display: scanning ? 'block' : 'none' }}
-              muted playsInline />
+            <video
+              ref={videoRef}
+              style={{ width: '100%', height: '100%', objectFit: 'cover', display: scanning ? 'block' : 'none' }}
+              muted playsInline
+            />
 
-            {/* Tela inicial (câmera parada) */}
+            {/* Tela inicial */}
             {!scanning && (
               <div style={{
                 position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
                 alignItems: 'center', justifyContent: 'center', gap: '0.75rem', color: '#94a3b8',
               }}>
-                <span style={{ fontSize: '3rem' }}>📷</span>
-                <span style={{ fontSize: '0.85rem' }}>
-                  {qrDetected ? '✅ QR lido com sucesso!' : 'Câmera parada'}
+                <span style={{ fontSize: '3rem' }}>{cameraMode === 'dados' ? '📸' : '📷'}</span>
+                <span style={{ fontSize: '0.85rem', textAlign: 'center', padding: '0 1rem' }}>
+                  {qrDetected
+                    ? (cameraMode === 'qr' ? '✅ QR lido com sucesso!' : '✅ Foto capturada!')
+                    : (cameraMode === 'dados'
+                        ? 'Modo Dados — foto da etiqueta'
+                        : 'Modo QR Code — scan automático'
+                      )
+                  }
                 </span>
               </div>
             )}
 
-            {/* Mira de scanner */}
-            {scanning && (
+            {/* Mira — QR mode: quadrado verde com cantos */}
+            {scanning && cameraMode === 'qr' && (
               <div style={{
                 position: 'absolute', top: '50%', left: '50%',
                 transform: 'translate(-50%, -50%)',
                 width: 200, height: 200,
-                border: '3px solid #22c55e',
-                borderRadius: 16,
-                boxShadow: '0 0 0 9999px rgba(0,0,0,0.5)',
+                border: '2px solid #22c55e',
+                borderRadius: 12,
+                boxShadow: '0 0 0 9999px rgba(0,0,0,0.45)',
                 pointerEvents: 'none',
               }}>
-                {/* Cantos decorativos */}
-                {['topleft','topright','bottomleft','bottomright'].map(corner => (
-                  <div key={corner} style={{
-                    position: 'absolute',
-                    width: 24, height: 24,
-                    borderColor: '#22c55e',
-                    borderStyle: 'solid',
-                    borderWidth: corner.includes('top') ? '3px 0 0 0' : '0 0 3px 0',
-                    ...(corner.includes('left') ? { left: -3, borderLeftWidth: 3 } : { right: -3, borderRightWidth: 3 }),
-                    ...(corner.includes('top') ? { top: -3 } : { bottom: -3 }),
-                    borderRadius: corner === 'topleft' ? '4px 0 0 0' : corner === 'topright' ? '0 4px 0 0' : corner === 'bottomleft' ? '0 0 0 4px' : '0 0 4px 0',
+                {['topleft','topright','bottomleft','bottomright'].map(c => (
+                  <div key={c} style={{
+                    position: 'absolute', width: 22, height: 22,
+                    borderColor: '#22c55e', borderStyle: 'solid',
+                    borderWidth: c.includes('top') ? '3px 0 0 0' : '0 0 3px 0',
+                    ...(c.includes('left') ? { left: -2, borderLeftWidth: 3 } : { right: -2, borderRightWidth: 3 }),
+                    ...(c.includes('top') ? { top: -2 } : { bottom: -2 }),
+                    borderRadius: c === 'topleft' ? '4px 0 0 0' : c === 'topright' ? '0 4px 0 0' : c === 'bottomleft' ? '0 0 0 4px' : '0 0 4px 0',
                   }} />
                 ))}
+              </div>
+            )}
+
+            {/* Mira — Dados mode: retângulo azul */}
+            {scanning && cameraMode === 'dados' && (
+              <div style={{
+                position: 'absolute', top: '50%', left: '50%',
+                transform: 'translate(-50%, -50%)',
+                width: '80%', height: '55%',
+                border: '2px solid #3b82f6',
+                borderRadius: 10,
+                boxShadow: '0 0 0 9999px rgba(0,0,0,0.35)',
+                pointerEvents: 'none',
+              }}>
+                {['topleft','topright','bottomleft','bottomright'].map(c => (
+                  <div key={c} style={{
+                    position: 'absolute', width: 24, height: 24,
+                    borderColor: '#3b82f6', borderStyle: 'solid',
+                    borderWidth: c.includes('top') ? '3px 0 0 0' : '0 0 3px 0',
+                    ...(c.includes('left') ? { left: -2, borderLeftWidth: 3 } : { right: -2, borderRightWidth: 3 }),
+                    ...(c.includes('top') ? { top: -2 } : { bottom: -2 }),
+                    borderRadius: c === 'topleft' ? '4px 0 0 0' : c === 'topright' ? '0 4px 0 0' : c === 'bottomleft' ? '0 0 0 4px' : '0 0 4px 0',
+                  }} />
+                ))}
+                <div style={{
+                  position: 'absolute', bottom: -26, left: '50%', transform: 'translateX(-50%)',
+                  fontSize: '0.72rem', color: '#93c5fd', whiteSpace: 'nowrap',
+                }}>
+                  Centralize a etiqueta aqui
+                </div>
               </div>
             )}
           </div>
 
           <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-          {/* Mensagem de status do scanner */}
+          {/* Mensagem de status */}
           <p style={{
-            marginTop: '0.5rem', fontSize: '0.8rem', textAlign: 'center',
-            color: qrDetected ? '#16a34a' : 'var(--text-muted)',
+            marginTop: '0.5rem', fontSize: '0.78rem', textAlign: 'center', minHeight: '1.2em',
+            color: (qrDetected || capturing) ? '#16a34a' : 'var(--text-muted)',
           }}>
-            {scanMsg}
+            {camMsg}
           </p>
 
-          {/* Botões */}
+          {/* Botões de ação */}
           <div className="flex gap-1" style={{ marginTop: '0.5rem' }}>
             {!scanning ? (
               <button className="btn btn-primary btn-sm" style={{ flex: 1 }} onClick={startCamera}>
-                📷 Abrir Câmera
+                {cameraMode === 'dados' ? '📸 Abrir Câmera' : '📷 Abrir Câmera'}
               </button>
             ) : (
-              <button className="btn btn-secondary btn-sm" style={{ flex: 1 }} onClick={stopCamera}>
-                ⏹ Parar Câmera
-              </button>
+              <>
+                {cameraMode === 'dados' && (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    style={{ flex: 1 }}
+                    onClick={capturePhoto}
+                    disabled={capturing}
+                  >
+                    {capturing ? '⏳ Processando...' : '📸 Capturar'}
+                  </button>
+                )}
+                <button className="btn btn-secondary btn-sm" style={{ flex: cameraMode === 'dados' ? 0 : 1 }} onClick={stopCamera}>
+                  ⏹ Parar
+                </button>
+              </>
             )}
 
-            <label className="btn btn-secondary btn-sm" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
-              📁 Carregar Imagem do QR
-              <input type="file" accept="image/*" style={{ display: 'none' }} onChange={handleQRImageUpload} />
-            </label>
+            {/* Upload de arquivo (fallback) */}
+            {cameraMode === 'qr' && (
+              <label className="btn btn-secondary btn-sm" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
+                📁 Carregar Imagem do QR
+                <input type="file" accept="image/*" style={{ display: 'none' }} onChange={handleQRImageUpload} />
+              </label>
+            )}
+            {cameraMode === 'dados' && !scanning && (
+              <label className="btn btn-secondary btn-sm" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
+                📁 Carregar Foto
+                <input type="file" accept="image/*" style={{ display: 'none' }}
+                  onChange={e => { const f = e.target.files[0]; if (f) processFile(f); e.target.value = '' }} />
+              </label>
+            )}
           </div>
 
-          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem', lineHeight: 1.5 }}>
-            Lê QR Codes de etiquetas Shopee, Correios, Jadlog e outros.
-            O texto decodificado é interpretado pela IA para preencher o formulário.
+          {/* Dica */}
+          <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.5rem', lineHeight: 1.5, textAlign: 'center' }}>
+            {cameraMode === 'dados'
+              ? '📸 Dados: fotografa a etiqueta e a IA extrai nome, CEP, cidade, endereço e bairro.'
+              : '📷 QR Code: scan automático de QR Codes de etiquetas Shopee, Correios, Jadlog e outros.'
+            }
           </p>
         </div>
       )}
