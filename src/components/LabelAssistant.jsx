@@ -204,16 +204,22 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
     if (!video || !canvas) return
 
     setCapturing(true)
-    setCamMsg('📸 Foto capturada! Extraindo dados com IA...')
-    stopCamera()
+    setCamMsg('📸 Capturando frame...')
 
-    canvas.width  = video.videoWidth  || 640
-    canvas.height = video.videoHeight || 480
+    // ⚠️ IMPORTANTE: captura o frame ANTES de parar a câmera
+    // (em iOS/Android o vídeo apaga imediatamente ao parar)
+    canvas.width  = video.videoWidth  || 1280
+    canvas.height = video.videoHeight || 720
     const ctx = canvas.getContext('2d')
     ctx.drawImage(video, 0, 0)
-    applyContrast(canvas, 1.5)
+    applyContrast(canvas, 1.3)
 
-    const b64 = canvas.toDataURL('image/jpeg', 0.92)
+    // Agora pode parar a câmera
+    stopCamera()
+
+    setCamMsg('🤖 Extraindo dados com IA...')
+
+    const b64 = canvas.toDataURL('image/jpeg', 0.95)
 
     try {
       setStatus('🤖 Gemini Vision lendo a etiqueta...')

@@ -7,16 +7,20 @@ const genAI = geminiKey ? new GoogleGenerativeAI(geminiKey) : null
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-// Valida se parece um nome real (mínimo 4 chars, tem pelo menos uma letra, não é só sigla/fragmento)
+// Valida se parece um nome real (mínimo 2 chars, tem pelo menos uma letra)
 function isValidName(name) {
   if (!name || typeof name !== 'string') return false
   const trimmed = name.trim()
-  return trimmed.length >= 4 && /[a-záéíóúãõâêîôûàèìòùç]/i.test(trimmed)
+  if (trimmed.length < 2) return false
+  if (/^null$/i.test(trimmed)) return false
+  if (/^n\/a$/i.test(trimmed)) return false
+  return /[a-záéíóúãõâêîôûàèìòùç]/i.test(trimmed)
 }
 
 function normalizeExtracted(obj) {
   if (!obj || typeof obj !== 'object') return null
-  const rawName = obj.customerName || obj.customer_name || obj.cliente || obj.destinatario || null
+  const rawName = obj.customerName || obj.customer_name || obj.cliente
+    || obj.destinatario || obj.nome || obj.recipient || obj.name || null
   return {
     customerName: isValidName(rawName) ? rawName.trim() : null,
     productName:  obj.productName  || obj.product_name  || obj.produto   || null,
@@ -256,34 +260,34 @@ export async function analyzeDocument(fileBase64, inventory, customers) {
 
   const inventoryCtx = inventory?.slice(0, 40).map(i => i.name).join(' | ') || 'Vazio'
 
-  const prompt = `Você é um scanner especializado em etiquetas logísticas brasileiras da Shopee, Mercado Livre e Correios.
+  const prompt = `Você é um scanner especializado em etiquetas de envio brasileiras (Shopee, Correios, Mercado Livre, Jadlog).
 
-ESTRUTURA TÍPICA DE UMA ETIQUETA SHOPEE (de cima para baixo):
-1. Cabeçalho "DESTINATÁRIO" (em negrito/caixa) → logo abaixo: NOME COMPLETO do cliente (ex: "Gabriela Milz Macedo Macruz")
-2. Endereço do destinatário (Rua, número, complemento, cidade, estado)
-3. Campos: Bairro, CEP, Pedido
-4. QR codes e código de rota em destaque (ex: "SP2-2", "LSP-16")
-5. Código de barras longo = código de rastreio (começa com BR, JT, LB...)
-6. Cabeçalho "REMETENTE" → nome do vendedor — IGNORAR ESTE NOME
-7. Campos: NF, DANFE
+TAREFA: Leia TODA a imagem e extraia os dados do DESTINATÁRIO.
 
-REGRAS OBRIGATÓRIAS:
-- customerName: nome COMPLETO logo abaixo do cabeçalho "DESTINATÁRIO". É sempre um nome de pessoa (ex: "Gabriela Milz Macedo Macruz"). NUNCA use o nome do remetente/vendedor.
-- address: SOMENTE rua + número + complemento (ex: "Rua Canário, 80, Apto 101 Flamboyant"). Sem cidade, sem estado.
-- bairro: bairro do destinatário (campo "Bairro:"). Ex: "Moema"
-- cep: CEP do destinatário com traço (campo "CEP:"). Ex: "04521-000"
-- location: SOMENTE o nome da cidade do destinatário. Ex: "São Paulo"
-- orderId: código alfanumérico do pedido (campo "Pedido:"). Ex: "260410FB4GUR2T"
-- nf: número da nota fiscal (campo "NF:" no rodapé). Ex: "1795"
-- rastreio: código de barras longo embaixo da etiqueta (começa com BR, JT, LB). Ex: "BR261423758638I"
-- modalidade: código de rota em destaque na caixa preta/cinza (ex: "SP2-2", "LSP-16", "SEDEX", "PAC", "COLETA")
-- productName: identifique se algum produto abaixo combina com o conteúdo da etiqueta, ou retorne null
-- quantity: quantidade, padrão 1
+ESTRUTURA TÍPICA (de cima para baixo):
+1. Caixa/Bloco "DESTINATÁRIO" em negrito — o texto imediatamente abaixo é o NOME DO CLIENTE
+2. Linha de endereço (rua, número, complemento, cidade, estado)
+3. Linhas: "Bairro: ...", "CEP: ...", "Pedido: ..."
+4. QR codes, códigos de rota (SP2-2, LSP-16, etc.)
+5. Código de barras = código de rastreio
 
-PRODUTOS CADASTRADOS: ${inventoryCtx}
+CAMPOS A EXTRAIR:
+- customerName: NOME COMPLETO da pessoa logo abaixo de "DESTINATÁRIO". Ex: "Laussani Pereira Campos". NUNCA use nome do remetente/vendedor.
+- address: só rua + número + complemento. Ex: "Avenida Abílio Augusto Távora, 3555, Bloco 17 apto 101"
+- bairro: bairro do destinatário. Ex: "Jardim Alvorada"
+- cep: CEP com traço. Ex: "26265-090"
+- location: só o nome da cidade. Ex: "Nova Iguaçu"
+- orderId: código do pedido. Ex: "260411FTHFM6A7"
+- nf: número da nota fiscal (campo NF:). Ex: "1795"
+- rastreio: código de rastreio longo (começa com BR, JT, LB). Ex: "BR261423758638I"
+- modalidade: código de rota ou serviço. Ex: "JDF-C", "SEDEX", "PAC"
+- productName: null (a menos que algum produto abaixo combine: ${inventoryCtx})
+- quantity: 1
 
-Retorne APENAS este JSON (sem markdown, sem explicações):
-{"customerName":"...","address":"...","bairro":"...","cep":"...","location":"...","orderId":"...","nf":"...","rastreio":"...","modalidade":"...","productName":null,"quantity":1}`
+IMPORTANTE: Se a imagem mostrar claramente o nome do destinatário, SEMPRE inclua em customerName. Não deixe null se conseguir ler.
+
+Retorne APENAS JSON puro (sem markdown, sem explicações):
+{"customerName":"...","address":"...","bairro":"...","cep":"...","location":"...","orderId":"...","nf":null,"rastreio":null,"modalidade":null,"productName":null,"quantity":1}`
 
   // Verifica se o resultado tem pelo menos algum campo útil
   const hasUsefulData = (r) => r && (r.customerName || r.orderId || r.rastreio || r.address || r.cep || r.location)
