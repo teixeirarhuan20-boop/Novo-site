@@ -204,26 +204,48 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
     if (!video || !canvas) return
 
     setCapturing(true)
-    setCamMsg('📸 Capturando frame...')
+    setCamMsg('📸 Capturando...')
 
-    // ⚠️ IMPORTANTE: captura o frame ANTES de parar a câmera
-    // (em iOS/Android o vídeo apaga imediatamente ao parar)
-    canvas.width  = video.videoWidth  || 1280
-    canvas.height = video.videoHeight || 720
-    const ctx = canvas.getContext('2d')
-    ctx.drawImage(video, 0, 0)
-    applyContrast(canvas, 1.3)
+    // ⚠️ Captura frame ANTES de parar (iOS apaga o vídeo imediatamente ao parar)
+    const w = video.videoWidth  || 1280
+    const h = video.videoHeight || 720
+    canvas.width  = w
+    canvas.height = h
+    canvas.getContext('2d').drawImage(video, 0, 0, w, h)
 
-    // Agora pode parar a câmera
+    // Para câmera DEPOIS de capturar o frame
     stopCamera()
 
-    setCamMsg('🤖 Extraindo dados com IA...')
-
-    const b64 = canvas.toDataURL('image/jpeg', 0.95)
+    const b64 = canvas.toDataURL('image/jpeg', 0.92)
 
     try {
+      // ── 1ª tentativa: Gemini Vision ──────────────────────────────────────
       setStatus('🤖 Gemini Vision lendo a etiqueta...')
-      const data = await analyzeDocument(b64, inventory, pessoas)
+      setCamMsg('🤖 Analisando com IA...')
+      let data = await analyzeDocument(b64, inventory, pessoas)
+
+      // ── 2ª tentativa: Tesseract OCR local → Gemini Texto ─────────────────
+      if (!data) {
+        setStatus('📝 OCR local...')
+        setCamMsg('📝 Tentando OCR local...')
+        try {
+          const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92))
+          const result = await Tesseract.recognize(blob, 'por+eng', {
+            logger: m => {
+              if (m.status === 'recognizing text')
+                setStatus(`📝 OCR: ${Math.round(m.progress * 100)}%`)
+            }
+          })
+          const ocrText = result.data.text?.trim()
+          if (ocrText && ocrText.length > 15) {
+            setStatus('🤖 Refinando com IA...')
+            setCamMsg('🤖 Refinando texto com IA...')
+            data = await analyzeText(ocrText, inventory, pessoas)
+          }
+        } catch (ocrErr) {
+          console.warn('OCR fallback:', ocrErr.message)
+        }
+      }
 
       if (data) {
         onDataExtracted(data)
@@ -232,9 +254,9 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
         setStatus('✅ Dados extraídos!')
         setCamMsg('✅ Pronto! Formulário preenchido.')
       } else {
-        addToast('IA não identificou os dados. Tente a aba "Imagem / Foto".', 'warning')
-        setStatus('⚠️ Não identificou campos. Tente Imagem / Foto.')
-        setCamMsg('⚠️ Tente centralizar melhor a etiqueta.')
+        addToast('Não identificou dados. Use "Carregar Foto" para melhor resultado.', 'warning')
+        setStatus('⚠️ Não identificou. Tente "Carregar Foto" abaixo.')
+        setCamMsg('⚠️ Tente tirar foto com mais luz ou use "Carregar Foto".')
       }
     } catch (err) {
       addToast(`Erro: ${err.message}`, 'error')

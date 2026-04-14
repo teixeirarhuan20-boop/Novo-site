@@ -290,15 +290,20 @@ Retorne APENAS JSON puro (sem markdown, sem explicações):
 {"customerName":"...","address":"...","bairro":"...","cep":"...","location":"...","orderId":"...","nf":null,"rastreio":null,"modalidade":null,"productName":null,"quantity":1}`
 
   // Verifica se o resultado tem pelo menos algum campo útil
-  const hasUsefulData = (r) => r && (r.customerName || r.orderId || r.rastreio || r.address || r.cep || r.location)
+  const hasUsefulData = (r) => r && (
+    r.customerName || r.orderId || r.rastreio ||
+    r.address || r.cep || r.location || r.bairro
+  )
 
-  // Gemini Vision como primário (mais preciso para fotos de etiqueta)
+  // Gemini Vision como primário
   try {
     const text = await callGeminiVision(prompt, b64, mimeType)
-    console.log('[Gemini Vision] resposta bruta:', text)
+    console.log('[Gemini Vision] raw:', text?.slice(0, 300))
     const result = extractJson(text)
-    console.log('[Gemini Vision] dados extraídos:', result)
+    console.log('[Gemini Vision] extracted:', JSON.stringify(result))
     if (hasUsefulData(result)) return result
+    // Tem resultado mas sem campos úteis — retorna mesmo assim se tem customerName
+    if (result?.customerName) return result
   } catch (e) {
     console.warn('[Gemini Vision] falhou:', e.message)
   }
@@ -307,9 +312,9 @@ Retorne APENAS JSON puro (sem markdown, sem explicações):
   if (groqKey) {
     try {
       const response = await callGroq(prompt, true, b64, mimeType)
-      console.log('[Groq Vision] resposta bruta:', response)
+      console.log('[Groq Vision] raw:', response?.slice(0, 300))
       const result = extractJson(response)
-      console.log('[Groq Vision] dados extraídos:', result)
+      console.log('[Groq Vision] extracted:', JSON.stringify(result))
       if (hasUsefulData(result)) return result
     } catch (e) {
       console.warn('[Groq Vision] falhou:', e.message)
