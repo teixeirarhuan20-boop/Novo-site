@@ -251,11 +251,32 @@ Mensagem:`
   }
 }
 
+// ─── Redimensiona imagem para no máximo maxW pixels de largura ───────────────
+// Imagens grandes (1920px+) causam timeout/falha silenciosa na API Gemini Vision
+function resizeBase64(dataUrl, maxW = 960, quality = 0.88) {
+  return new Promise(resolve => {
+    const img = new Image()
+    img.onload = () => {
+      const scale = Math.min(1, maxW / img.width)
+      const w = Math.floor(img.width  * scale)
+      const h = Math.floor(img.height * scale)
+      const c = document.createElement('canvas')
+      c.width = w; c.height = h
+      c.getContext('2d').drawImage(img, 0, 0, w, h)
+      resolve(c.toDataURL('image/jpeg', quality))
+    }
+    img.onerror = () => resolve(dataUrl) // fallback: usa original
+    img.src = dataUrl
+  })
+}
+
 export async function analyzeDocument(fileBase64, inventory, customers) {
-  const b64 = fileBase64.includes(',') ? fileBase64.split(',')[1] : fileBase64
-  let mimeType = 'image/jpeg'
-  if (fileBase64.includes(';base64,')) {
-    mimeType = fileBase64.split(';base64,')[0].split(':')[1]
+  // Redimensiona para max 960px — evita timeout no Gemini Vision
+  const resized   = await resizeBase64(fileBase64, 960, 0.88)
+  const b64       = resized.includes(',') ? resized.split(',')[1] : resized
+  let   mimeType  = 'image/jpeg'
+  if (resized.includes(';base64,')) {
+    mimeType = resized.split(';base64,')[0].split(':')[1]
   }
 
   const inventoryCtx = inventory?.slice(0, 40).map(i => i.name).join(' | ') || 'Vazio'
