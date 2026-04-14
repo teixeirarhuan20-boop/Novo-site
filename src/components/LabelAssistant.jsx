@@ -2,6 +2,24 @@ import React, { useState, useRef, useCallback, useEffect } from 'react'
 import Tesseract from 'tesseract.js'
 import { analyzeDocument, analyzeText, formatLabelText } from '../lib/gemini'
 
+// ─── Beep de sucesso (Web Audio API, sem arquivo externo) ────────────────────
+function playBeep() {
+  try {
+    const ctx  = new (window.AudioContext || window.webkitAudioContext)()
+    const osc  = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.type = 'sine'
+    osc.frequency.setValueAtTime(1046, ctx.currentTime)       // Dó6 — tom de scanner
+    osc.frequency.setValueAtTime(1318, ctx.currentTime + 0.07) // Mi6 — acorde
+    gain.gain.setValueAtTime(0.25, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2)
+    osc.start(ctx.currentTime)
+    osc.stop(ctx.currentTime + 0.2)
+  } catch { /* silencia erros de autoplay policy */ }
+}
+
 // ─── Carrega jsQR via CDN (sem depender de npm) ──────────────────────────────
 function loadJsQR() {
   return new Promise((resolve) => {
@@ -321,6 +339,7 @@ export function LabelAssistant({ inventory, pessoas, addToast, onDataExtracted }
 
   // ── Câmera: processa QR decodificado ─────────────────────────────────────
   const handleQRDecoded = useCallback(async (rawData) => {
+    playBeep()   // 🔊 bip de sucesso
     stopCamera()
     setQrDetected(true)
     setCamMsg('✅ QR lido! Extraindo dados com IA...')

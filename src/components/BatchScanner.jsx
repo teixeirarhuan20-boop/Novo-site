@@ -5,6 +5,71 @@ import { supabase } from '../lib/supabase'
 import { generateId, formatDate, formatCurrency } from '../utils/formatting'
 import { geocode, packLocation } from '../utils/location'
 
+// ─── Beep de sucesso (Web Audio API) ─────────────────────────────────────────
+function playBeep() {
+  try {
+    const ctx  = new (window.AudioContext || window.webkitAudioContext)()
+    const osc  = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.type = 'sine'
+    osc.frequency.setValueAtTime(1046, ctx.currentTime)
+    osc.frequency.setValueAtTime(1318, ctx.currentTime + 0.07)
+    gain.gain.setValueAtTime(0.25, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2)
+    osc.start(ctx.currentTime)
+    osc.stop(ctx.currentTime + 0.2)
+  } catch {}
+}
+
+// ─── Beep de erro / alerta (tom mais grave) ───────────────────────────────────
+function playWarn() {
+  try {
+    const ctx  = new (window.AudioContext || window.webkitAudioContext)()
+    const osc  = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.type = 'square'
+    osc.frequency.setValueAtTime(440, ctx.currentTime)
+    osc.frequency.setValueAtTime(330, ctx.currentTime + 0.12)
+    gain.gain.setValueAtTime(0.15, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3)
+    osc.start(ctx.currentTime)
+    osc.stop(ctx.currentTime + 0.3)
+  } catch {}
+}
+
+// ─── Verifica duplicata na mesma data ────────────────────────────────────────
+function checkDuplicate(labelData, transactions) {
+  if (!labelData) return null
+  const today = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+
+  const normName = (s) => s?.toLowerCase().trim().replace(/\s+/g, ' ')
+
+  for (const tx of transactions) {
+    // Compara a data da transação
+    const txDate = tx.date ? String(tx.date).slice(0, 10) : ''
+    if (txDate !== today) continue
+
+    // Bate pelo orderId (mais preciso)
+    if (labelData.orderId && tx.orderId && tx.orderId === labelData.orderId) {
+      return { type: 'orderId', value: labelData.orderId, tx }
+    }
+
+    // Bate pelo nome do cliente
+    const txPerson = normName(tx.personName)
+    const labelPerson = normName(labelData.customerName)
+    if (txPerson && labelPerson && txPerson === labelPerson) {
+      return { type: 'name', value: labelData.customerName, tx }
+    }
+  }
+
+  // Também verifica dentro da fila atual (orders já bipadas)
+  return null
+}
+
 // ─── Carrega jsQR via CDN ─────────────────────────────────────────────────────
 function loadJsQR() {
   return new Promise(resolve => {
@@ -66,6 +131,7 @@ function CameraModal({ title, subtitle, mode, onPhoto, onQR, onClose }) {
     const imgData = c.getContext('2d').getImageData(0, 0, c.width, c.height)
     const code = window.jsQR?.(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'dontInvert' })
     if (code?.data) {
+      playBeep()
       stopCam()
       onQR?.(code.data)
     } else {
@@ -207,11 +273,12 @@ function ProductCameraModal({ onQR, onClose }) {
 }
 
 // ─── Card de cada pedido na fila ──────────────────────────────────────────────
-function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct, onFinalize, onRemove }) {
-  const { labelData, productData, status, quantity = 1, loadingMsg } = order
+function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct, onFinalize, onRemove, onConfirmDuplicate }) {
+  const { labelData, productData, status, quantity = 1, loadingMsg, duplicateInfo } = order
 
   const statusStyle = {
     loading:       { color: '#818cf8', label: loadingMsg || '⏳ Analisando etiqueta...' },
+    duplicate:     { color: '#dc2626', label: '⚠️ Já processado hoje!' },
     needs_product: { color: '#f59e0b', label: '🏷️ Aguardando produto' },
     ready:         { color: '#16a34a', label: '✅ Pronto para finalizar' },
     processing:    { color: '#818cf8', label: '⏳ Finalizando...' },
@@ -314,6 +381,44 @@ function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct,
         </div>
       )}
 
+      {/* ── Bloco de duplicata ── */}
+      {status === 'duplicate' && (
+        <div style={{
+          marginTop: '0.65rem',
+          padding: '0.85rem 1rem',
+          background: '#fef2f2',
+          border: '1.5px solid #fca5a5',
+          borderRadius: 10,
+        }}>
+          <p style={{ fontSize: '0.82rem', color: '#991b1b', fontWeight: 700, marginBottom: '0.3rem' }}>
+            🔒 Verificação manual necessária
+          </p>
+          <p style={{ fontSize: '0.78rem', color: '#b91c1c', marginBottom: '0.65rem', lineHeight: 1.5 }}>
+            {duplicateInfo?.type === 'orderId'
+              ? `O pedido ${duplicateInfo.value} já foi processado hoje.`
+              : `O cliente "${duplicateInfo?.value}" já foi processado hoje.`
+            }
+            <br/>Confirme se realmente deseja registrar novamente.
+          </p>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button
+              className="btn btn-sm"
+              style={{ flex: 1, background: '#dc2626', color: '#fff', border: 'none', fontSize: '0.78rem' }}
+              onClick={onConfirmDuplicate}
+            >
+              ✅ Confirmar mesmo assim
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              style={{ flex: 1, fontSize: '0.78rem' }}
+              onClick={onRemove}
+            >
+              🗑️ Descartar
+            </button>
+          </div>
+        </div>
+      )}
+
       {status === 'done' && (
         <div style={{ marginTop: '0.4rem', fontSize: '0.78rem', color: '#16a34a', fontWeight: 600 }}>
           ✅ Pedido registrado e estoque atualizado!
@@ -375,14 +480,43 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
         }
       }
 
+      // ── Verifica duplicata ──────────────────────────────────────────────────
+      const dup = data ? checkDuplicate(data, transactions) : null
+      if (dup) {
+        playWarn()
+        setOrders(prev => prev.map(o => o.id === tempId
+          ? { ...o, labelData: data, status: 'duplicate', duplicateInfo: dup, loadingMsg: null }
+          : o
+        ))
+        addToast(`⚠️ "${dup.value}" já foi processado hoje! Verificação necessária.`, 'warning')
+        return
+      }
+
+      // Também verifica contra outros pedidos na fila atual
+      const queueDup = orders.find(o =>
+        o.id !== tempId &&
+        o.labelData?.customerName &&
+        data?.customerName &&
+        o.labelData.customerName.toLowerCase().trim() === data.customerName.toLowerCase().trim()
+      )
+      if (queueDup) {
+        playWarn()
+        const dupInfo = { type: 'name', value: data.customerName, inQueue: true }
+        setOrders(prev => prev.map(o => o.id === tempId
+          ? { ...o, labelData: data, status: 'duplicate', duplicateInfo: dupInfo, loadingMsg: null }
+          : o
+        ))
+        addToast(`⚠️ "${data.customerName}" já está na fila! Verificação necessária.`, 'warning')
+        return
+      }
+
       setOrders(prev => prev.map(o => o.id === tempId
         ? { ...o, labelData: data || null, status: 'needs_product', loadingMsg: null }
         : o
       ))
 
       if (data?.customerName || data?.cep || data?.location) {
-        const nome = data.customerName || data.location || 'ok'
-        addToast(`✅ Etiqueta lida: ${nome}`, 'success')
+        addToast(`✅ Etiqueta lida: ${data.customerName || data.location}`, 'success')
       } else {
         addToast('⚠️ Dados não extraídos. Selecione o produto manualmente.', 'warning')
       }
@@ -393,7 +527,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       ))
       addToast(`Erro ao analisar foto: ${err.message}`, 'error')
     }
-  }, [inventory, pessoas, addToast])
+  }, [inventory, pessoas, transactions, orders, addToast])
 
   // ── Processa QR da etiqueta ────────────────────────────────────────────────
   const handleLabelQR = useCallback(async (rawData) => {
@@ -412,6 +546,18 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       } catch {}
 
       const data = await analyzeText(rawData, inventory, pessoas)
+
+      const dup = data ? checkDuplicate(data, transactions) : null
+      if (dup) {
+        playWarn()
+        setOrders(prev => prev.map(o => o.id === tempId
+          ? { ...o, labelData: data, status: 'duplicate', duplicateInfo: dup, loadingMsg: null }
+          : o
+        ))
+        addToast(`⚠️ "${dup.value}" já foi processado hoje!`, 'warning')
+        return
+      }
+
       setOrders(prev => prev.map(o => o.id === tempId
         ? { ...o, labelData: data, status: 'needs_product', loadingMsg: null }
         : o
@@ -424,7 +570,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       ))
       addToast(`Erro ao analisar QR: ${err.message}`, 'error')
     }
-  }, [inventory, pessoas, addToast])
+  }, [inventory, pessoas, transactions, addToast])
 
   // ── Processa QR do produto ─────────────────────────────────────────────────
   const handleProductQR = useCallback((rawData, orderId) => {
@@ -442,12 +588,23 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       })
     }
     if (product) {
+      playBeep()
       setOrders(prev => prev.map(o => o.id === orderId ? { ...o, productData: product, status: 'ready' } : o))
       addToast(`🏷️ Produto: ${product.name}`, 'success')
     } else {
       addToast('Produto não identificado. Selecione manualmente.', 'warning')
     }
   }, [inventory, addToast])
+
+  // ── Confirma duplicata manualmente ─────────────────────────────────────────
+  const confirmDuplicate = useCallback((orderId) => {
+    setOrders(prev => prev.map(o =>
+      o.id === orderId
+        ? { ...o, status: 'needs_product', duplicateInfo: null }
+        : o
+    ))
+    addToast('Pedido liberado para processamento manual.', 'info')
+  }, [addToast])
 
   const selectProduct = useCallback((orderId, productId) => {
     const product = inventory.find(p => p.id === productId)
@@ -570,6 +727,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
             onSelectProduct={productId => selectProduct(order.id, productId)}
             onFinalize={() => finalizeOrder(order.id)}
             onRemove={() => setOrders(prev => prev.filter(o => o.id !== order.id))}
+            onConfirmDuplicate={() => confirmDuplicate(order.id)}
           />
         ))}
       </div>
