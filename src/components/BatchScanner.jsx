@@ -1,4 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react'
+import Tesseract from 'tesseract.js'
 import { analyzeDocument, analyzeText } from '../lib/gemini'
 import { supabase } from '../lib/supabase'
 import { generateId, formatDate, formatCurrency } from '../utils/formatting'
@@ -41,7 +42,7 @@ function CameraModal({ title, subtitle, mode, onPhoto, onQR, onClose }) {
       await videoRef.current.play()
       setActive(true)
       setMsg(mode === 'photo'
-        ? 'Enquadre a etiqueta e clique em Capturar'
+        ? 'Enquadre o DESTINATÁRIO e clique em Capturar'
         : 'Aponte para o QR Code da etiqueta')
       if (mode === 'qr') rafRef.current = requestAnimationFrame(tick)
     } catch {
@@ -72,28 +73,20 @@ function CameraModal({ title, subtitle, mode, onPhoto, onQR, onClose }) {
     }
   }
 
-  // Captura foto com pré-processamento para melhorar OCR
+  // Captura foto — desenha frame ANTES de parar (iOS apaga stream imediatamente)
   function capture() {
     const v = videoRef.current
-    const c = document.createElement('canvas')
-    c.width = v.videoWidth; c.height = v.videoHeight
-    const ctx = c.getContext('2d')
-    ctx.drawImage(v, 0, 0)
+    if (!v || !v.videoWidth) { setMsg('⚠️ Câmera ainda iniciando, tente novamente.'); return }
 
-    // Leve aumento de contraste para ajudar o Gemini
-    const imgData = ctx.getImageData(0, 0, c.width, c.height)
-    const d = imgData.data
-    const factor = (259 * (50 + 255)) / (255 * (259 - 50))
-    for (let i = 0; i < d.length; i += 4) {
-      d[i]   = Math.min(255, Math.max(0, factor * (d[i]   - 128) + 128))
-      d[i+1] = Math.min(255, Math.max(0, factor * (d[i+1] - 128) + 128))
-      d[i+2] = Math.min(255, Math.max(0, factor * (d[i+2] - 128) + 128))
-    }
-    ctx.putImageData(imgData, 0, 0)
+    const c = document.createElement('canvas')
+    c.width  = v.videoWidth
+    c.height = v.videoHeight
+    c.getContext('2d').drawImage(v, 0, 0)  // captura frame
 
     setFlash(true)
     setTimeout(() => setFlash(false), 200)
-    stopCam()
+    stopCam()  // para câmera DEPOIS de capturar
+
     onPhoto?.(c.toDataURL('image/jpeg', 0.92))
   }
 
@@ -107,7 +100,6 @@ function CameraModal({ title, subtitle, mode, onPhoto, onQR, onClose }) {
       if (mode === 'photo') {
         onPhoto?.(ev.target.result)
       } else {
-        // Tenta decodificar QR da imagem
         const img = new Image()
         img.onload = () => {
           const c = document.createElement('canvas')
@@ -125,7 +117,6 @@ function CameraModal({ title, subtitle, mode, onPhoto, onQR, onClose }) {
     e.target.value = ''
   }
 
-  // Borda da mira: azul para foto, verde para QR
   const borderColor = mode === 'photo' ? '#3b82f6' : '#22c55e'
   const frameStyle  = mode === 'photo'
     ? { width: '90%', height: '65%', borderRadius: 8 }
@@ -150,10 +141,8 @@ function CameraModal({ title, subtitle, mode, onPhoto, onQR, onClose }) {
         <div style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', background: '#0f172a', aspectRatio: '4/3' }}>
           <video ref={videoRef} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted playsInline />
 
-          {/* Flash de captura */}
           {flash && <div style={{ position: 'absolute', inset: 0, background: 'rgba(255,255,255,0.5)', pointerEvents: 'none' }} />}
 
-          {/* Mira */}
           {active && (
             <div style={{
               position: 'absolute', top: '50%', left: '50%',
@@ -163,7 +152,6 @@ function CameraModal({ title, subtitle, mode, onPhoto, onQR, onClose }) {
               pointerEvents: 'none',
               ...frameStyle,
             }}>
-              {/* Corner accents para QR */}
               {mode === 'qr' && [
                 { top: -3, left: -3,   borderTop: `3px solid ${borderColor}`, borderLeft:  `3px solid ${borderColor}`, borderRadius: '6px 0 0 0' },
                 { top: -3, right: -3,  borderTop: `3px solid ${borderColor}`, borderRight: `3px solid ${borderColor}`, borderRadius: '0 6px 0 0' },
@@ -173,7 +161,6 @@ function CameraModal({ title, subtitle, mode, onPhoto, onQR, onClose }) {
                 <div key={i} style={{ position: 'absolute', width: 22, height: 22, ...s }} />
               ))}
 
-              {/* Label hint no modo foto */}
               {mode === 'photo' && (
                 <div style={{
                   position: 'absolute', bottom: 8, left: '50%', transform: 'translateX(-50%)',
@@ -206,7 +193,7 @@ function CameraModal({ title, subtitle, mode, onPhoto, onQR, onClose }) {
   )
 }
 
-// ─── QR Scanner para produto (somente QR) ────────────────────────────────────
+// ─── QR Scanner para produto ──────────────────────────────────────────────────
 function ProductCameraModal({ onQR, onClose }) {
   return (
     <CameraModal
@@ -221,10 +208,10 @@ function ProductCameraModal({ onQR, onClose }) {
 
 // ─── Card de cada pedido na fila ──────────────────────────────────────────────
 function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct, onFinalize, onRemove }) {
-  const { labelData, productData, status, quantity = 1 } = order
+  const { labelData, productData, status, quantity = 1, loadingMsg } = order
 
   const statusStyle = {
-    loading:       { color: '#818cf8', label: '⏳ Analisando etiqueta...' },
+    loading:       { color: '#818cf8', label: loadingMsg || '⏳ Analisando etiqueta...' },
     needs_product: { color: '#f59e0b', label: '🏷️ Aguardando produto' },
     ready:         { color: '#16a34a', label: '✅ Pronto para finalizar' },
     processing:    { color: '#818cf8', label: '⏳ Finalizando...' },
@@ -247,7 +234,6 @@ function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct,
         )}
       </div>
 
-      {/* Dados extraídos da etiqueta */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.2rem 1rem', fontSize: '0.81rem', marginBottom: '0.6rem' }}>
         {labelData?.customerName && <span>👤 <b>{labelData.customerName}</b></span>}
         {labelData?.location     && <span>📍 {labelData.location}</span>}
@@ -259,17 +245,16 @@ function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct,
         {labelData?.modalidade   && <span>🚚 {labelData.modalidade}</span>}
         {status === 'loading' && (
           <span style={{ gridColumn: 'span 2', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-            🤖 IA extraindo dados...
+            🤖 {loadingMsg || 'Processando...'}
           </span>
         )}
         {!labelData && status !== 'loading' && (
           <span style={{ gridColumn: 'span 2', color: 'var(--text-muted)', fontSize: '0.74rem' }}>
-            Nenhum dado extraído
+            ⚠️ Dados não extraídos — selecione o produto e finalize manualmente.
           </span>
         )}
       </div>
 
-      {/* Produto */}
       <div style={{ borderTop: '1px solid var(--border)', paddingTop: '0.65rem' }}>
         {productData ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
@@ -307,7 +292,6 @@ function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct,
         ) : null}
       </div>
 
-      {/* Ações */}
       {status !== 'done' && status !== 'loading' && (
         <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.65rem', flexWrap: 'wrap' }}>
           <button
@@ -343,45 +327,81 @@ function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct,
 export function BatchScanner({ inventory, setInventory, transactions, setTransactions, pessoas, setPessoas, addToast }) {
   const [orders,  setOrders]  = useState([])
   const [camera,  setCamera]  = useState(null)
-  // camera: null | { type: 'photo-label' | 'qr-label' | 'product', orderId? }
 
-  // ── Helpers para abrir câmera ───────────────────────────────────────────────
   const openPhotoLabel = () => setCamera({ type: 'photo-label' })
   const openQRLabel    = () => setCamera({ type: 'qr-label' })
   const openProduct    = (orderId) => setCamera({ type: 'product', orderId })
 
-  // ── Processa foto da etiqueta (Gemini Vision) ───────────────────────────────
+  // Helper para atualizar loadingMsg do card
+  const setLoadingMsg = (tempId, msg) =>
+    setOrders(prev => prev.map(o => o.id === tempId ? { ...o, loadingMsg: msg } : o))
+
+  // ── Processa foto da etiqueta: Gemini Vision → Tesseract fallback ───────────
   const handleLabelPhoto = useCallback(async (base64) => {
     setCamera(null)
     const tempId = generateId()
-    setOrders(prev => [...prev, { id: tempId, status: 'loading', labelData: null, productData: null, quantity: 1 }])
+    setOrders(prev => [...prev, { id: tempId, status: 'loading', loadingMsg: '🤖 Gemini Vision...', labelData: null, productData: null, quantity: 1 }])
 
     try {
-      setOrders(prev => prev.map(o => o.id === tempId ? { ...o, status: 'loading' } : o))
-      const data = await analyzeDocument(base64, inventory, pessoas)
+      // ── 1ª tentativa: Gemini Vision ────────────────────────────────────────
+      setLoadingMsg(tempId, '🤖 Gemini Vision lendo...')
+      let data = await analyzeDocument(base64, inventory, pessoas)
+
+      // ── 2ª tentativa: Tesseract OCR → Gemini Texto ─────────────────────────
+      if (!data) {
+        setLoadingMsg(tempId, '📝 OCR local...')
+        try {
+          // Converte base64 para blob
+          const res  = await fetch(base64)
+          const blob = await res.blob()
+
+          const result = await Tesseract.recognize(blob, 'por+eng', {
+            logger: m => {
+              if (m.status === 'recognizing text') {
+                setLoadingMsg(tempId, `📝 OCR: ${Math.round(m.progress * 100)}%`)
+              }
+            }
+          })
+
+          const ocrText = result.data.text?.trim()
+          console.log('[Tesseract OCR]', ocrText?.slice(0, 200))
+
+          if (ocrText && ocrText.length > 15) {
+            setLoadingMsg(tempId, '🤖 Refinando com IA...')
+            data = await analyzeText(ocrText, inventory, pessoas)
+          }
+        } catch (ocrErr) {
+          console.warn('[Tesseract fallback]', ocrErr.message)
+        }
+      }
+
       setOrders(prev => prev.map(o => o.id === tempId
-        ? { ...o, labelData: data, status: 'needs_product' }
+        ? { ...o, labelData: data || null, status: 'needs_product', loadingMsg: null }
         : o
       ))
-      const nome = data?.customerName || data?.location || 'Etiqueta processada'
-      addToast(`✅ Etiqueta lida: ${nome}`, 'success')
+
+      if (data?.customerName || data?.cep || data?.location) {
+        const nome = data.customerName || data.location || 'ok'
+        addToast(`✅ Etiqueta lida: ${nome}`, 'success')
+      } else {
+        addToast('⚠️ Dados não extraídos. Selecione o produto manualmente.', 'warning')
+      }
     } catch (err) {
       setOrders(prev => prev.map(o => o.id === tempId
-        ? { ...o, labelData: null, status: 'needs_product' }
+        ? { ...o, labelData: null, status: 'needs_product', loadingMsg: null }
         : o
       ))
       addToast(`Erro ao analisar foto: ${err.message}`, 'error')
     }
   }, [inventory, pessoas, addToast])
 
-  // ── Processa QR da etiqueta (Gemini texto) ──────────────────────────────────
+  // ── Processa QR da etiqueta ────────────────────────────────────────────────
   const handleLabelQR = useCallback(async (rawData) => {
     setCamera(null)
     const tempId = generateId()
-    setOrders(prev => [...prev, { id: tempId, status: 'loading', rawQR: rawData, labelData: null, productData: null, quantity: 1 }])
+    setOrders(prev => [...prev, { id: tempId, status: 'loading', loadingMsg: '🤖 Analisando QR...', rawQR: rawData, labelData: null, productData: null, quantity: 1 }])
 
     try {
-      // Ignora QR de produto do nosso sistema
       try {
         const parsed = JSON.parse(rawData)
         if (parsed.id && parsed.name) {
@@ -393,20 +413,20 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
 
       const data = await analyzeText(rawData, inventory, pessoas)
       setOrders(prev => prev.map(o => o.id === tempId
-        ? { ...o, labelData: data, status: 'needs_product' }
+        ? { ...o, labelData: data, status: 'needs_product', loadingMsg: null }
         : o
       ))
       addToast(`✅ QR lido: ${data?.customerName || data?.location || 'ok'}`, 'success')
     } catch (err) {
       setOrders(prev => prev.map(o => o.id === tempId
-        ? { ...o, labelData: null, status: 'needs_product' }
+        ? { ...o, labelData: null, status: 'needs_product', loadingMsg: null }
         : o
       ))
       addToast(`Erro ao analisar QR: ${err.message}`, 'error')
     }
   }, [inventory, pessoas, addToast])
 
-  // ── Processa QR do produto ──────────────────────────────────────────────────
+  // ── Processa QR do produto ─────────────────────────────────────────────────
   const handleProductQR = useCallback((rawData, orderId) => {
     setCamera(null)
     let product = null
@@ -429,14 +449,13 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     }
   }, [inventory, addToast])
 
-  // ── Seleciona produto manualmente ───────────────────────────────────────────
   const selectProduct = useCallback((orderId, productId) => {
     const product = inventory.find(p => p.id === productId)
     if (!product) return
     setOrders(prev => prev.map(o => o.id === orderId ? { ...o, productData: product, status: 'ready' } : o))
   }, [inventory])
 
-  // ── Finaliza pedido ─────────────────────────────────────────────────────────
+  // ── Finaliza pedido ────────────────────────────────────────────────────────
   const finalizeOrder = useCallback(async (orderId) => {
     const order = orders.find(o => o.id === orderId)
     if (!order?.productData) return
@@ -503,16 +522,12 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     <div>
       {/* Toolbar */}
       <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
-        {/* Opção principal: fotografar etiqueta */}
         <button className="btn btn-primary" onClick={openPhotoLabel}>
           📸 Fotografar Etiqueta
         </button>
-
-        {/* Opção alternativa: ler QR da etiqueta */}
         <button className="btn btn-secondary" onClick={openQRLabel}>
           📷 QR da Etiqueta
         </button>
-
         {readyCount > 1 && (
           <button className="btn btn-sm" style={{ background: 'var(--success)', color: '#fff', border: 'none' }} onClick={finalizeAll}>
             ✅ Finalizar Todos ({readyCount})
@@ -534,8 +549,8 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
           <div style={{ fontSize: '3rem', marginBottom: '0.75rem' }}>📸</div>
           <p style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '0.5rem' }}>Nenhuma etiqueta na fila</p>
           <p style={{ fontSize: '0.82rem', lineHeight: 1.7, marginBottom: '1rem' }}>
-            <b>📸 Fotografar Etiqueta</b> — aponte a câmera e a IA lê nome, CEP, cidade, endereço e bairro direto da impressão.<br/>
-            <b>📷 QR da Etiqueta</b> — escaneia o QR code impresso na etiqueta.
+            <b>📸 Fotografar Etiqueta</b> — aponte a câmera e a IA lê nome, CEP, cidade, endereço e bairro.<br/>
+            <b>📷 QR da Etiqueta</b> — escaneia o QR Code impresso na etiqueta.
           </p>
           <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center', fontSize: '0.78rem' }}>
             <span>📦 Shopee</span><span>·</span><span>📮 Correios</span><span>·</span><span>🚚 Jadlog</span>
@@ -559,7 +574,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
         ))}
       </div>
 
-      {/* Modais de câmera */}
+      {/* Modais */}
       {camera?.type === 'photo-label' && (
         <CameraModal
           mode="photo"
