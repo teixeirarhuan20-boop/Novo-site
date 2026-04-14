@@ -58,23 +58,60 @@ export function unpackLocation(itemName) {
   return null
 }
 
+// Paleta ampliada — 20 cores visualmente distintas (sem colisões até 20 produtos)
 export const COLOR_PALETTE = [
-  '#2563eb', '#16a34a', '#d97706', '#dc2626',
-  '#7c3aed', '#0891b2', '#db2777', '#4b5563',
-  '#059669', '#b45309', '#4338ca', '#84cc16',
+  '#2563eb', // azul
+  '#16a34a', // verde
+  '#dc2626', // vermelho
+  '#d97706', // âmbar
+  '#7c3aed', // violeta
+  '#0891b2', // ciano
+  '#db2777', // rosa
+  '#ea580c', // laranja
+  '#0f766e', // teal
+  '#4338ca', // índigo
+  '#65a30d', // lima
+  '#9333ea', // roxo
+  '#0284c7', // azul-céu
+  '#b45309', // marrom-âmbar
+  '#be185d', // rosa-escuro
+  '#059669', // esmeralda
+  '#c2410c', // laranja-escuro
+  '#1d4ed8', // azul-escuro
+  '#15803d', // verde-escuro
+  '#6d28d9', // violeta-escuro
 ]
 
+// Retorna a cor do produto pelo inventário (campo color) ou pelo índice na paleta
+// Prefira buildColorMap para garantir cores únicas por produto no mapa
 export function getProductColor(name, inventory = []) {
   const found = inventory.find(i =>
     (i.name || '').toLowerCase().trim() === (name || '').toLowerCase().trim()
   )
   if (found?.color) return found.color
 
+  // fallback por hash (usado fora do mapa onde não há lista de produtos)
   let hash = 0
   for (let i = 0; i < (name || '').length; i++) {
     hash = name.charCodeAt(i) + ((hash << 5) - hash)
   }
   return COLOR_PALETTE[Math.abs(hash) % COLOR_PALETTE.length]
+}
+
+// Constrói mapa nome→cor garantindo cor ÚNICA por produto (sem colisões)
+// productNames deve ser a lista ORDENADA de produtos a exibir
+export function buildColorMap(productNames, inventory = []) {
+  const map = {}
+  let paletteIdx = 0
+  for (const name of productNames) {
+    const inv = inventory.find(i =>
+      (i.name || '').toLowerCase().trim() === (name || '').toLowerCase().trim()
+    )
+    // Usa cor do inventário se existir, senão pega próxima cor da paleta
+    map[name] = inv?.color || COLOR_PALETTE[paletteIdx % COLOR_PALETTE.length]
+    if (!inv?.color) paletteIdx++
+  }
+  return map
 }
 
 export function jitter(value, amount = 0.002) {

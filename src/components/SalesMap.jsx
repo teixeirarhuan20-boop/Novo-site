@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useMemo } from 'react'
-import { unpackLocation, getProductColor, jitter } from '../utils/location'
+import { unpackLocation, buildColorMap, jitter } from '../utils/location'
 import { formatCurrency } from '../utils/formatting'
 
 export function SalesMap({ transactions, inventory, isActive }) {
@@ -12,6 +12,9 @@ export function SalesMap({ transactions, inventory, isActive }) {
   const productList = useMemo(() => [
     ...new Set(sales.map(t => unpackLocation(t.itemName)?.cleanName || t.itemName.split('||')[0].trim()))
   ], [sales])
+
+  // Mapa produto→cor por ÍNDICE — sem colisões de hash
+  const colorMap = useMemo(() => buildColorMap(productList, inventory), [productList, inventory])
 
   useEffect(() => {
     const init = () => {
@@ -40,7 +43,7 @@ export function SalesMap({ transactions, inventory, isActive }) {
     sales.forEach(t => {
       const loc = unpackLocation(t.itemName)
       if (!loc?.lat || !loc?.lng || isNaN(loc.lat)) return
-      const color = getProductColor(loc.cleanName, inventory)
+      const color = colorMap[loc.cleanName] || '#64748b'
       const m = window.L.circleMarker([jitter(loc.lat), jitter(loc.lng)], {
         radius: 11, fillColor: color, color: '#fff', weight: 2, opacity: 1, fillOpacity: 0.88,
       }).addTo(mapRef.current).bindPopup(`
@@ -83,7 +86,7 @@ export function SalesMap({ transactions, inventory, isActive }) {
             }}>
               <span style={{
                 width: 10, height: 10, borderRadius: '50%',
-                background: getProductColor(p, inventory), flexShrink: 0,
+                background: colorMap[p] || '#64748b', flexShrink: 0,
               }} />
               {p}
             </span>
