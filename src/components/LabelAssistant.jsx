@@ -1,336 +1,406 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { analyzeOrderDocument, analyzeOrderText } from '../gemini';
-import Tesseract from 'tesseract.js';
+import React, { useState, useEffect, useRef } from 'react'
+import { analyzeDocument, analyzeText } from '../lib/gemini'
+import Tesseract from 'tesseract.js'
 
-export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }) {
-  const [isDragging, setIsDragging] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [pastedText, setPastedText] = useState('');
-  const [extractedData, setExtractedData] = useState(null);
-  const [cooldown, setCooldown] = useState(0);
-  const [scanProgress, setScanProgress] = useState(0);
-  const [previewUrl, setPreviewUrl] = useState(null);
-  const [showCamera, setShowCamera] = useState(false);
-
-  const videoRef = useRef(null);
-  const streamRef = useRef(null);
+// ─── Modal de câmera — idêntico ao Scanner em Lote ───────────────────────────
+function CameraModal({ onCapture, onClose }) {
+  const [msg,    setMsg]    = useState('Iniciando câmera...')
+  const [active, setActive] = useState(false)
+  const videoRef  = useRef(null)
+  const canvasRef = useRef(null)
+  const streamRef = useRef(null)
 
   useEffect(() => {
-    let timer;
-    if (cooldown > 0) {
-      timer = setInterval(() => {
-        setCooldown(prev => prev - 1);
-      }, 1000);
-    }
-    return () => clearInterval(timer);
-  }, [cooldown]);
+    startCam()
+    return () => stopCam()
+  }, [])
 
-  const startCamera = async () => {
-    setShowCamera(true);
-    setIsProcessing(true);
+  async function startCam() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment', width: { ideal: 1280 } } 
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-    } catch (err) {
-      if (addToast) addToast("Erro ao acessar câmera: " + err.message, "error");
-      setShowCamera(false);
-    } finally {
-      setIsProcessing(false);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 } },
+      })
+      streamRef.current = stream
+      videoRef.current.srcObject = stream
+      await videoRef.current.play()
+      setActive(true)
+      setMsg('Posicione a etiqueta no quadro e capture')
+    } catch {
+      setMsg('❌ Câmera não disponível.')
     }
-  };
+  }
 
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
+  function stopCam() {
+    streamRef.current?.getTracks().forEach(t => t.stop())
+  }
+
+  const capture = () => {
+    const v = videoRef.current
+    const canvas = document.createElement('canvas')
+    canvas.width  = v.videoWidth
+    canvas.height = v.videoHeight
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(v, 0, 0)
+
+    // Pré-processamento: grayscale + contraste para melhorar OCR
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    const pix = imgData.data
+    const factor = (259 * (60 + 255)) / (255 * (259 - 60))
+    for (let i = 0; i < pix.length; i += 4) {
+      let g = 0.2126 * pix[i] + 0.7152 * pix[i + 1] + 0.0722 * pix[i + 2]
+      g = Math.max(0, Math.min(255, factor * (g - 128) + 128))
+      pix[i] = pix[i + 1] = pix[i + 2] = g
     }
-    setShowCamera(false);
-  };
+    ctx.putImageData(imgData, 0, 0)
+    stopCam()
+    onCapture(canvas.toDataURL('image/jpeg', 0.85))
+  }
 
-  // Cleanup da câmera ao desmontar o componente
-  useEffect(() => () => stopCamera(), []);
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    if (cooldown > 0) return; // Bloqueia soltar imagens se estiver em espera
-    const file = e.dataTransfer.files[0];
-    if (file) processFile(file);
-  };
-
-  const captureAndProcess = () => {
-    if (!videoRef.current) return;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = videoRef.current.videoWidth;
-    canvas.height = videoRef.current.videoHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(videoRef.current, 0, 0);
-
-    // Converte para Blob para reutilizar a lógica de processamento de arquivo
-    canvas.toBlob((blob) => {
-      const file = new File([blob], "capture.jpg", { type: "image/jpeg" });
-      processFile(file);
-      stopCamera();
-    }, 'image/jpeg', 0.95);
-  };
-
-  const processFile = (file) => {
-    setScanProgress(0);
-    setIsProcessing(true);
-
-    // Verificação de Qualidade (Somente para imagens)
-    if (file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        setPreviewUrl(e.target.result);
-        const img = new Image();
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          const ctx = canvas.getContext('2d');
-          canvas.width = 64; canvas.height = 64; // Miniatura para processamento rápido
-          ctx.drawImage(img, 0, 0, 64, 64);
-          const { data } = ctx.getImageData(0, 0, 64, 64);
-          let totalLum = 0, totalDiff = 0;
-          for (let i = 0; i < data.length; i += 4) {
-            const lum = 0.2126 * data[i] + 0.7152 * data[i+1] + 0.0722 * data[i+2];
-            totalLum += lum;
-            if (i >= 4) {
-              const prevLum = 0.2126 * data[i-4] + 0.7152 * data[i-3] + 0.0722 * data[i-2];
-              totalDiff += Math.abs(lum - prevLum);
-            }
-          }
-          const avgLum = totalLum / (data.length / 4);
-          const avgDiff = totalDiff / (data.length / 4);
-          
-          if (addToast) {
-            if (avgLum < 70) addToast("🌙 Imagem escura detectada. Aumente a iluminação para melhor leitura.", "warning");
-            if (avgDiff < 10) addToast("🌫️ Imagem embaçada ou sem contraste detectada.", "warning");
-          }
-
-          // Criar canvas processado (escala de cinza) para o Tesseract
-          const procCanvas = document.createElement('canvas');
-          const procCtx = procCanvas.getContext('2d');
-          procCanvas.width = img.width;
-          procCanvas.height = img.height;
-          procCtx.drawImage(img, 0, 0);
-
-          const imageData = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
-          const pixels = imageData.data;
-          
-          // Otimização para OCR: Aumentar contraste e normalizar tons de cinza
-          const contrast = 65; // Ajuste de intensidade (0-100)
-          const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
-
-          for (let i = 0; i < pixels.length; i += 4) {
-            // 1. Converte para tons de cinza (Luma BT.709)
-            let v = 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
-            
-            // 2. Aplica o fator de contraste e faz o clamping entre 0 e 255
-            v = Math.max(0, Math.min(255, factor * (v - 128) + 128));
-            
-            pixels[i] = pixels[i + 1] = pixels[i + 2] = v;
-          }
-          procCtx.putImageData(imageData, 0, 0);
-          
-          performOCR(procCanvas, file);
-        };
-        img.src = e.target.result;
-      };
-      reader.readAsDataURL(file);
-    } else {
-      performOCR(file, file);
-    }
-  };
-
-  const performOCR = (source, originalFile) => {
-    // OCR Local e Ilimitado com Tesseract.js
-    Tesseract.recognize(
-      source,
-      'por',
-      { logger: m => { if (m.status === 'recognizing text') setScanProgress(Math.floor(m.progress * 100)); } }
-    ).then(async ({ data: { text } }) => {
-      console.log("📝 Texto extraído via Tesseract:", text);
-      try {
-        // Envia o texto extraído para o motor de filtragem que já construímos
-        const data = await analyzeOrderText(text, inventory || [], pessoas || [], cooldown > 0);
-        if (data && (data.customerName || data.orderId || data.rastreio)) {
-          setExtractedData(data);
-          if(addToast) addToast("✅ Etiqueta lida localmente com sucesso!", "success");
-        } else {
-          // Fallback: se o Tesseract falhar em ler bem o texto, tenta passar a imagem pra IA
-          if (addToast) addToast("Buscando detalhes com a IA Remota...", "info");
-          const reader = new FileReader();
-          reader.onload = async (event) => {
-            const base64 = event.target.result;
-            try {
-              const fallbackData = await analyzeOrderDocument(base64, inventory || [], pessoas || []);
-              if (fallbackData) setExtractedData(fallbackData);
-              else if(addToast) addToast("Nenhum dado legível na imagem.", "error");
-            } catch (fallbackErr) {
-              if (fallbackErr.message.includes("429") || fallbackErr.message.includes("Limite")) {
-                setCooldown(60);
-                if (addToast) addToast("Cota esgotada. Somente leitura local funcionando.", "warning");
-              } else {
-                if(addToast) addToast("Erro na IA Remota: " + fallbackErr.message, "error");
-              }
-            } finally { setIsProcessing(false); }
-          };
-          reader.readAsDataURL(originalFile);
-          return; // Sai do then para esperar o reader
-        }
-      } catch (error) {
-        if (addToast) addToast("Erro no filtro: " + error.message, "error");
-      }
-      setScanProgress(0);
-      setIsProcessing(false);
-    }).catch(err => {
-      setScanProgress(0);
-      setIsProcessing(false);
-      if(addToast) addToast("Erro no Scanner Local: " + err.message, "error");
-    });
-  };
-
-  const handleTextAnalyze = async () => {
-    if (!pastedText.trim()) return;
-    setIsProcessing(true);
-    try {
-      const data = await analyzeOrderText(pastedText, inventory || [], pessoas || [], cooldown > 0);
-      if (data) {
-         setExtractedData(data);
-      } else {
-         if(addToast) addToast("A IA não encontrou dados válidos nesse texto.", "warning");
-      }
-    } catch (error) {
-      if (error.message.includes("Limite de leituras") || error.message.includes("429")) {
-        setCooldown(60);
-        if (addToast) addToast("Muitas leituras! Aguarde o tempo do contador na tela.", "warning");
-      } else {
-        if(addToast) addToast("Erro na leitura de texto: " + error.message, "error");
-      }
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+  function handleFile(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => { stopCam(); onCapture(ev.target.result) }
+    reader.readAsDataURL(file)
+    e.target.value = ''
+  }
 
   return (
-    <div style={{ marginBottom: '2rem', display: 'flex', flexDirection: 'column', gap: '1rem', background: 'var(--panel-bg)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-      <div style={{ display: 'flex', gap: '1rem', width: '100%' }}>
-        {/* 1. ZONA DE IMAGENS E PDF */}
-        {showCamera ? (
-          <div style={{ flex: 1, position: 'relative', overflow: 'hidden', borderRadius: '8px', background: '#000', height: '350px' }}>
-            <video 
-              ref={videoRef} 
-              autoPlay 
-              playsInline 
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-            />
-            <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: '85%', height: '60%', border: '2px solid rgba(59, 130, 246, 0.8)', borderRadius: '8px', boxShadow: '0 0 0 9999px rgba(0,0,0,0.5)', pointerEvents: 'none' }}></div>
-            <div style={{ position: 'absolute', bottom: '10px', left: 0, right: 0, display: 'flex', justifyContent: 'center', gap: '10px' }}>
-              <button 
-                onClick={captureAndProcess}
-                className="save-btn" 
-                style={{ padding: '5px 15px', fontSize: '0.8rem' }}
-              >
-                📸 Capturar
-              </button>
-              <button 
-                onClick={stopCamera}
-                className="cancel-btn" 
-                style={{ padding: '5px 15px', fontSize: '0.8rem' }}
-              >
-                Cancelar
-              </button>
-            </div>
-          </div>
-        ) : (
-        <div 
-          className={`bi-drop-zone ${isDragging ? 'dragging' : ''}`}
-          onDragOver={(e) => { e.preventDefault(); if (cooldown === 0) setIsDragging(true); }}
-          onDragLeave={(e) => { e.preventDefault(); setIsDragging(false); }}
-          onDrop={handleDrop}
-          style={{ flex: 1, position: 'relative', margin: 0, padding: '1.5rem', background: cooldown > 0 ? 'rgba(239, 68, 68, 0.05)' : 'rgba(59, 130, 246, 0.05)', border: `2px dashed ${cooldown > 0 ? '#ef4444' : '#3b82f6'}`, borderRadius: '8px', opacity: cooldown > 0 ? 0.7 : 1 }}
-        >
-          <input type="file" accept="image/*,application/pdf" onChange={(e) => e.target.files[0] && processFile(e.target.files[0])} style={{ display: 'none' }} id="label-upload" disabled={cooldown > 0} />
-          <label htmlFor="label-upload" style={{ cursor: cooldown > 0 ? 'not-allowed' : 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%', margin: 0 }}>
-            {previewUrl ? (
-              <img src={previewUrl} alt="Preview" style={{ maxHeight: '80px', borderRadius: '4px', marginBottom: '10px', border: '1px solid var(--border-color)' }} />
-            ) : (
-              <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>{cooldown > 0 ? '⏳' : ''}</div>
-            )}
-            <p style={{ fontSize: '0.75rem', margin: 0, color: cooldown > 0 ? '#ef4444' : '#3b82f6', fontWeight: '600', textAlign: 'center' }}>
-              {cooldown > 0 ? `Aguarde ${cooldown}s...` : previewUrl ? 'Trocar Arquivo' : 'Arrastar Imagem/PDF'}
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 3000, padding: '1rem',
+    }}>
+      <div className="card" style={{ maxWidth: 460, width: '100%', margin: 0 }}>
+        {/* Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: '1rem' }}>📷 Ler Etiqueta</h3>
+            <p style={{ margin: 0, fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+              Enquadre o texto do destinatário da etiqueta
             </p>
-            <button 
-              onClick={(e) => { e.preventDefault(); startCamera(); }}
-              className="btn-secondary"
-              style={{ marginTop: '10px', fontSize: '0.7rem', padding: '4px 8px' }}
-            >
-              📷 Usar Câmera
-            </button>
-          </label>
-          {isProcessing && (
-            <div className="ai-processing-overlay" style={{ borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <div className="ai-pulse"></div>
-              {scanProgress > 0 && scanProgress < 100 && (
-                <div style={{ width: '70%', background: 'rgba(255,255,255,0.1)', height: '6px', borderRadius: '10px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }}>
-                  <div style={{ width: `${scanProgress}%`, background: '#3b82f6', height: '100%', transition: 'width 0.3s ease-out', boxShadow: '0 0 10px rgba(59, 130, 246, 0.5)' }}></div>
-                </div>
-              )}
-              <span style={{ fontSize: '0.7rem', color: 'white', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                {scanProgress > 0 && scanProgress < 100 ? `Escaneando... ${scanProgress}%` : 'Processando...'}
-              </span>
-            </div>
+          </div>
+          <button className="btn btn-secondary btn-sm" onClick={() => { stopCam(); onClose() }}>✕</button>
+        </div>
+
+        {/* Vídeo */}
+        <div style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', background: '#0f172a', height: '320px' }}>
+          <video ref={videoRef} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted playsInline />
+          {active && (
+            <div style={{
+              position: 'absolute', top: '50%', left: '50%',
+              transform: 'translate(-50%,-50%)',
+              width: '85%', height: '60%',
+              border: '2px solid #3b82f6', borderRadius: 8,
+              boxShadow: '0 0 0 9999px rgba(0,0,0,0.5)',
+              pointerEvents: 'none',
+            }} />
           )}
         </div>
-        )}
+        <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-        {/* 2. ZONA DE TEXTO COPIADO (SHOPEE / ML) */}
-        <div style={{ flex: 2, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-           <textarea 
-             value={pastedText}
-             onChange={(e) => setPastedText(e.target.value)}
-             placeholder="...ou cole o texto da etiqueta de envio aqui (Ex: Dados da Shopee ou Mercado Livre)"
-             className="inline-input"
-             style={{ flex: 1, resize: 'none', backgroundColor: 'var(--input-bg)', minHeight: '120px', color: 'var(--text-color)' }}
-           />
-           <button onClick={handleTextAnalyze} disabled={isProcessing || !pastedText.trim()} className="save-btn" style={{ width: '100%', padding: '0.6rem', backgroundColor: cooldown > 0 ? '#10a37f' : undefined, borderColor: cooldown > 0 ? '#10a37f' : undefined, cursor: 'pointer' }}>
-              {isProcessing ? 'Filtrando...' : cooldown > 0 ? `⚡ Filtrar Offline (Instantâneo)` : '🤖 Filtrar Dados da Etiqueta'}
-           </button>
+        <p style={{ textAlign: 'center', fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0.5rem 0' }}>{msg}</p>
+
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button className="btn btn-primary" style={{ flex: 2 }} onClick={capture}>
+            📸 Capturar Etiqueta
+          </button>
+          <label className="btn btn-secondary" style={{ flex: 1, textAlign: 'center', cursor: 'pointer' }}>
+            📁 Galeria
+            <input type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFile} />
+          </label>
         </div>
       </div>
+    </div>
+  )
+}
 
-      {/* 3. ZONA DE PREVIEW E COLAR RÁPIDO */}
-      {extractedData && (
-        <div style={{ marginTop: '0.5rem', padding: '1.5rem', background: 'rgba(16, 163, 127, 0.05)', border: '1px solid rgba(16, 163, 127, 0.3)', borderRadius: '8px', width: '100%' }}>
-          <h4 style={{ margin: '0 0 1rem 0', color: '#10a37f', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <span>✅</span> Dados Encontrados. Revise antes de colar:
-          </h4>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', fontSize: '0.9rem', marginBottom: '1.5rem', color: 'var(--text-color)' }}>
-            <div><strong style={{ color: 'var(--text-muted)' }}>Cliente:</strong><br/>{extractedData.customerName || <em style={{color: '#94a3b8'}}>Não identificado</em>}</div>
-            <div><strong style={{ color: 'var(--text-muted)' }}>Destino:</strong><br/>{extractedData.location || <em style={{color: '#94a3b8'}}>Não identificado</em>}</div>
-            <div><strong style={{ color: 'var(--text-muted)' }}>CEP:</strong><br/>{extractedData.cep || <em style={{color: '#94a3b8'}}>Não informado</em>}</div>
-            <div><strong style={{ color: 'var(--text-muted)' }}>Pedido (Ref):</strong><br/>{extractedData.orderId || <em style={{color: '#94a3b8'}}>Sem ref</em>}</div>
-            <div><strong style={{ color: 'var(--text-muted)' }}>NF:</strong><br/>{extractedData.nf || <em style={{color: '#94a3b8'}}>Sem NF</em>}</div>
-            <div><strong style={{ color: 'var(--text-muted)' }}>Produto Detectado:</strong><br/>{extractedData.productName || <em style={{color: '#94a3b8'}}>Não identificado</em>}</div>
-            <div><strong style={{ color: 'var(--text-muted)' }}>Quantidade:</strong><br/>{extractedData.quantity || '1'}</div>
-            <div style={{ gridColumn: '1 / -1' }}><strong style={{ color: 'var(--text-muted)' }}>Endereço Completo:</strong><br/>{extractedData.address || <em style={{color: '#94a3b8'}}>Não extraído</em>}</div>
+// ─── Componente principal ──────────────────────────────────────────────────────
+export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }) {
+  const [showCamera,     setShowCamera]     = useState(false)
+  const [isProcessing,   setIsProcessing]   = useState(false)
+  const [progress,       setProgress]       = useState(0)
+  const [previewUrl,     setPreviewUrl]     = useState(null)
+  const [extractedData,  setExtractedData]  = useState(null)
+  const [pastedText,     setPastedText]     = useState('')
+  const [showTextInput,  setShowTextInput]  = useState(false)
+  const [cooldown,       setCooldown]       = useState(0)
+
+  useEffect(() => {
+    if (cooldown <= 0) return
+    const t = setInterval(() => setCooldown(p => p - 1), 1000)
+    return () => clearInterval(t)
+  }, [cooldown])
+
+  // ─── Processa imagem (base64 ou File) ─────────────────────────────────────
+  const processImage = async (base64OrDataUrl) => {
+    setIsProcessing(true)
+    setProgress(0)
+    setExtractedData(null)
+
+    const dataUrl = base64OrDataUrl.startsWith('data:') ? base64OrDataUrl : `data:image/jpeg;base64,${base64OrDataUrl}`
+    setPreviewUrl(dataUrl)
+
+    try {
+      // 1) OCR local com Tesseract (gratuito, offline)
+      const { data: { text } } = await Tesseract.recognize(dataUrl, 'por', {
+        logger: m => { if (m.status === 'recognizing text') setProgress(Math.round(m.progress * 100)) },
+      })
+
+      const result = await analyzeText(text, inventory || [], pessoas || [])
+      if (result && (result.customerName || result.orderId || result.rastreio || result.location)) {
+        setExtractedData(result)
+        addToast?.('✅ Etiqueta lida com sucesso!', 'success')
+        return
+      }
+
+      // 2) Fallback: Vision AI (se Tesseract não extraiu dados suficientes)
+      addToast?.('Refinando com IA visual...', 'info')
+      const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
+      const fallback = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory || [], pessoas || [])
+      if (fallback) {
+        setExtractedData(fallback)
+        addToast?.('✅ Dados extraídos pela IA!', 'success')
+      } else {
+        addToast?.('Nenhum dado reconhecível na imagem.', 'warning')
+      }
+    } catch (err) {
+      if (err.message?.includes('429') || err.message?.includes('Limite')) {
+        setCooldown(60)
+        addToast?.('⏳ Limite de IA atingido. Aguarde 1 min.', 'warning')
+      } else {
+        addToast?.('Erro ao processar: ' + err.message, 'error')
+      }
+    } finally {
+      setIsProcessing(false)
+      setProgress(0)
+    }
+  }
+
+  const handleFileInput = (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => processImage(ev.target.result)
+    reader.readAsDataURL(file)
+    e.target.value = ''
+  }
+
+  const handleTextAnalyze = async () => {
+    if (!pastedText.trim()) return
+    setIsProcessing(true)
+    try {
+      const result = await analyzeText(pastedText, inventory || [], pessoas || [])
+      if (result) {
+        setExtractedData(result)
+        addToast?.('✅ Dados extraídos do texto!', 'success')
+      } else {
+        addToast?.('Nenhum dado encontrado no texto.', 'warning')
+      }
+    } catch (err) {
+      addToast?.('Erro: ' + err.message, 'error')
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  const applyData = () => {
+    if (!extractedData) return
+    onDataExtracted(extractedData)
+    setExtractedData(null)
+    setPastedText('')
+    setPreviewUrl(null)
+  }
+
+  // ─── Render ──────────────────────────────────────────────────────────────
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+
+      {/* ── Botões de captura ── */}
+      <div style={{ display: 'flex', gap: '0.55rem' }}>
+        {/* Câmera */}
+        <button
+          type="button"
+          onClick={() => setShowCamera(true)}
+          style={{
+            flex: 1, padding: '0.85rem 0.5rem',
+            background: 'linear-gradient(135deg,#1d4ed8,#2563eb)',
+            color: '#fff', border: 'none', borderRadius: 10,
+            fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.2rem',
+          }}
+        >
+          <span style={{ fontSize: '1.4rem' }}>📷</span>
+          Câmera
+        </button>
+
+        {/* Galeria */}
+        <label style={{
+          flex: 1, padding: '0.85rem 0.5rem',
+          background: 'linear-gradient(135deg,#0f766e,#0d9488)',
+          color: '#fff', borderRadius: 10,
+          fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.2rem',
+        }}>
+          <span style={{ fontSize: '1.4rem' }}>🖼️</span>
+          Galeria
+          <input type="file" accept="image/*,application/pdf" style={{ display: 'none' }} onChange={handleFileInput} />
+        </label>
+
+        {/* Texto */}
+        <button
+          type="button"
+          onClick={() => setShowTextInput(v => !v)}
+          style={{
+            flex: 1, padding: '0.85rem 0.5rem',
+            background: showTextInput ? 'linear-gradient(135deg,#7c3aed,#6d28d9)' : '#1e293b',
+            color: showTextInput ? '#fff' : '#94a3b8',
+            border: showTextInput ? 'none' : '1px solid #334155',
+            borderRadius: 10, fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.2rem',
+          }}
+        >
+          <span style={{ fontSize: '1.4rem' }}>📋</span>
+          Texto
+        </button>
+      </div>
+
+      {/* ── Campo de texto colado ── */}
+      {showTextInput && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <textarea
+            value={pastedText}
+            onChange={e => setPastedText(e.target.value)}
+            placeholder="Cole aqui o texto da etiqueta (Shopee, Mercado Livre, Correios...)"
+            rows={5}
+            style={{
+              resize: 'vertical', padding: '0.75rem',
+              borderRadius: 10, border: '1px solid #334155',
+              background: '#0f172a', color: '#e2e8f0',
+              fontSize: '0.82rem', lineHeight: 1.5, fontFamily: 'inherit',
+            }}
+          />
+          <button
+            type="button"
+            onClick={handleTextAnalyze}
+            disabled={isProcessing || !pastedText.trim()}
+            style={{
+              padding: '0.65rem', borderRadius: 10,
+              background: pastedText.trim() ? '#7c3aed' : '#1e293b',
+              color: '#fff', border: 'none', fontWeight: 700,
+              fontSize: '0.85rem', cursor: 'pointer',
+              opacity: isProcessing ? 0.7 : 1,
+            }}
+          >
+            {isProcessing ? '⏳ Processando...' : '🤖 Extrair Dados do Texto'}
+          </button>
+        </div>
+      )}
+
+      {/* ── Preview da imagem + barra de progresso ── */}
+      {isProcessing && (
+        <div style={{
+          background: '#0f172a', borderRadius: 12, padding: '1rem',
+          border: '1px solid #1e293b', textAlign: 'center',
+        }}>
+          {previewUrl && (
+            <img src={previewUrl} alt="preview" style={{
+              maxHeight: 80, borderRadius: 6, marginBottom: '0.6rem',
+              border: '1px solid #334155', display: 'block', margin: '0 auto 0.6rem',
+            }} />
+          )}
+          <div style={{ height: 6, background: '#1e293b', borderRadius: 10, overflow: 'hidden', marginBottom: '0.4rem' }}>
+            <div style={{ width: `${progress || 30}%`, height: '100%', background: '#3b82f6', transition: 'width 0.3s', borderRadius: 10 }} />
           </div>
-          <div style={{ display: 'flex', gap: '1rem' }}>
-             <button onClick={() => { onDataExtracted(extractedData); setExtractedData(null); setPastedText(''); }} className="save-btn" style={{ flex: 1, padding: '0.8rem', fontSize: '1rem', fontWeight: 'bold' }}>
-               ⚡ Colar Rápido no Formulário
-             </button>
-             <button onClick={() => setExtractedData(null)} className="cancel-btn" style={{ padding: '0.8rem 1.5rem' }}>
-               Descartar
-             </button>
+          <span style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
+            {progress > 0 ? `Escaneando texto... ${progress}%` : 'Analisando com IA...'}
+          </span>
+        </div>
+      )}
+
+      {/* ── Miniatura + resultado ── */}
+      {!isProcessing && previewUrl && !extractedData && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.6rem 0.8rem', background: '#0f172a', borderRadius: 10, border: '1px solid #334155' }}>
+          <img src={previewUrl} alt="preview" style={{ width: 48, height: 48, borderRadius: 6, objectFit: 'cover', border: '1px solid #334155', flexShrink: 0 }} />
+          <span style={{ color: '#64748b', fontSize: '0.8rem' }}>Nenhum dado reconhecível. Tente outra imagem.</span>
+        </div>
+      )}
+
+      {/* ── Dados Extraídos ── */}
+      {extractedData && (
+        <div style={{
+          background: 'rgba(16,163,127,0.06)',
+          border: '1px solid rgba(16,163,127,0.35)',
+          borderRadius: 12, padding: '1rem',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            {previewUrl && (
+              <img src={previewUrl} alt="prev" style={{ width: 44, height: 44, borderRadius: 6, objectFit: 'cover', border: '1px solid #334155', flexShrink: 0 }} />
+            )}
+            <div>
+              <div style={{ fontWeight: 700, color: '#10a37f', fontSize: '0.88rem' }}>✅ Dados encontrados</div>
+              <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>Revise e clique em "Usar dados"</div>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem 1rem', fontSize: '0.8rem', marginBottom: '0.85rem' }}>
+            {[
+              ['👤 Cliente',   extractedData.customerName],
+              ['📍 Cidade',    extractedData.location],
+              ['📮 CEP',       extractedData.cep],
+              ['🔖 Pedido',    extractedData.orderId],
+              ['🧾 NF',        extractedData.nf],
+              ['📦 Rastreio',  extractedData.rastreio],
+              ['🚚 Modalidade',extractedData.modalidade],
+              ['🏷️ Produto',   extractedData.productName],
+            ].filter(([, v]) => v).map(([label, value]) => (
+              <div key={label} style={{ minWidth: 0 }}>
+                <span style={{ color: '#94a3b8' }}>{label}:</span>
+                <div style={{ color: '#e2e8f0', fontWeight: 600, wordBreak: 'break-word' }}>{value}</div>
+              </div>
+            ))}
+            {extractedData.address && (
+              <div style={{ gridColumn: '1 / -1' }}>
+                <span style={{ color: '#94a3b8' }}>🏠 Endereço:</span>
+                <div style={{ color: '#e2e8f0', fontWeight: 600 }}>{extractedData.address}</div>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button
+              type="button"
+              onClick={applyData}
+              style={{
+                flex: 1, padding: '0.7rem', borderRadius: 10,
+                background: '#10a37f', color: '#fff',
+                border: 'none', fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer',
+              }}
+            >
+              ⚡ Usar dados no formulário
+            </button>
+            <button
+              type="button"
+              onClick={() => { setExtractedData(null); setPreviewUrl(null) }}
+              style={{
+                padding: '0.7rem 1rem', borderRadius: 10,
+                background: 'none', color: '#94a3b8',
+                border: '1px solid #334155', cursor: 'pointer', fontSize: '0.88rem',
+              }}
+            >
+              ✕
+            </button>
           </div>
         </div>
       )}
+
+      {/* ── Modal de câmera ── */}
+      {showCamera && (
+        <CameraModal
+          onCapture={img => { setShowCamera(false); processImage(img) }}
+          onClose={() => setShowCamera(false)}
+        />
+      )}
     </div>
-  );
+  )
 }
