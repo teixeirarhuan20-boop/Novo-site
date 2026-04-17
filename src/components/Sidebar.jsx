@@ -12,6 +12,10 @@ const NAV = [
   { id: 'estoque',   icon: '📦', label: 'Estoque' },
   { id: 'pessoas',   icon: '👥', label: 'Pessoas / CRM' },
   { id: 'historico', icon: '📜', label: 'Histórico' },
+  { section: 'PROSPECÇÃO' },
+  { id: 'prospeccao', icon: '🔎', label: 'Prospecção de Leads' },
+  { id: 'leads',      icon: '🎯', label: 'Leads Capturados' },
+  { id: 'abordagem',  icon: '📣', label: 'Abordagem — Ana' },
   { section: 'SISTEMA' },
   { id: 'logs',      icon: '🚨', label: 'Log de Erros' },
 ]

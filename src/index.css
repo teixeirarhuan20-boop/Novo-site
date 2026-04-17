@@ -1048,3 +1048,173 @@ tbody tr:hover { background: rgba(219,234,254,0.2) !important; }
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── Luna Agent — Estilos Exclusivos ────────────────────────────────────── */
+
+/* Indicador "Agente" no header do chat */
+.luna-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  background: linear-gradient(135deg, rgba(22,163,74,0.3), rgba(16,185,129,0.2));
+  border: 1px solid rgba(22,163,74,0.4);
+  color: #4ade80;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-full);
+}
+
+.luna-agent-badge::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4ade80;
+  animation: agentPulse 2s ease infinite;
+}
+
+@keyframes agentPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.8); }
+}
+
+/* Bolha de "ferramenta sendo chamada" */
+.tool-call-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  padding: 0.3rem 0.6rem;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.3rem;
+  animation: fadeIn 0.2s ease;
+}
+
+.tool-call-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #3b82f6;
+  animation: toolPulse 1s ease infinite;
+}
+
+@keyframes toolPulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+/* Card de Oportunidade de Mercado no chat */
+.opportunity-card {
+  background: linear-gradient(135deg, #f0fdf4, #ecfdf5);
+  border: 1px solid #86efac;
+  border-left: 4px solid #16a34a;
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  margin: 0.5rem 0;
+  font-size: 0.82rem;
+}
+
+.opportunity-card .opp-city {
+  font-weight: 800;
+  font-size: 0.95rem;
+  color: #15803d;
+  margin-bottom: 0.3rem;
+}
+
+.opportunity-card .opp-product {
+  color: #166534;
+  font-weight: 600;
+}
+
+.opportunity-card .opp-leads {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: #dcfce7;
+  color: #15803d;
+  font-weight: 700;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--radius-full);
+  margin-top: 0.4rem;
+}
+
+/* Typing animation aprimorada para Luna */
+.luna-typing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0.4rem 0;
+}
+
+.luna-typing span {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #16a34a;
+  animation: lunaTyping 1.2s ease infinite;
+}
+.luna-typing span:nth-child(2) { animation-delay: 0.2s; }
+.luna-typing span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes lunaTyping {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40%           { transform: scale(1);   opacity: 1; }
+}
+
+/* Override: bolha da Luna com typing */
+.chat-msg.bot .msg-bubble.is-loading {
+  background: linear-gradient(135deg, #f0fdf4, var(--surface));
+  border: 1px dashed #86efac;
+}
+
+/* Imagem no chat — animação de entrada */
+.chat-msg .msg-bubble img {
+  animation: imageIn 0.3s var(--ease) forwards;
+}
+
+@keyframes imageIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* Botão de ação rápida dentro do chat (ex: "Confirmar Pedido") */
+.chat-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 0.4rem 0.9rem;
+  border-radius: var(--radius-full);
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s var(--ease);
+  margin-right: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.chat-action-btn.confirm {
+  background: linear-gradient(135deg, #16a34a, #059669);
+  color: white;
+  box-shadow: 0 2px 8px rgba(22,163,74,0.3);
+}
+.chat-action-btn.confirm:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(22,163,74,0.4);
+}
+
+.chat-action-btn.cancel {
+  background: var(--surface-3);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.chat-action-btn.cancel:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}

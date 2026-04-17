@@ -186,3 +186,112 @@ npm run build -- --outDir /caminho/fora/do/dist
 **Arquivos alterados:** `src/lib/gemini.js`
 
 **Build:** ✅ Rebuild feito em `/tmp/vite-build` (os `node_modules` do Windows na pasta original têm permissão somente-leitura no Linux). Copiado para `dist/assets/index-yK4IWDvU.js`.
+
+---
+
+### [2026-04-13] — Funcionalidade de QR Codes por produto
+
+**Solicitado:** Cada produto cadastrado ter um QR Code com suas informações. Ao escanear, abrir formulário para abater no estoque com todas as configurações normais de pedido.
+
+**Arquivos criados:**
+- `src/components/QRCodeManager.jsx` — Página completa de gestão de QR Codes
+
+**Arquivos alterados:**
+- `src/components/Sidebar.jsx` — Adicionado `{ id: 'qrcodes', icon: '🏷️', label: 'QR Codes' }` na seção OPERAÇÃO
+- `src/App.jsx` — Adicionado import de `QRCodeManager` e `case 'qrcodes': return <QRCodeManager {...props} />`
+- `package.json` — Adicionado `"jsqr": "^1.4.0"` para decodificar QR codes via câmera/imagem
+
+**Como funciona o QRCodeManager:**
+
+1. **Grid de produtos** — Cada produto cadastrado aparece como card com nome, categoria, preço, quantidade e QR code gerado dinamicamente via `api.qrserver.com`
+2. **QR Code** — Encoda `PRODUTO:<id>:<nome>:<preço>` — link gratuito, sem npm package para geração
+3. **Impressão** — Botão "Imprimir" abre `window.open()` com layout otimizado para etiqueta
+4. **Scanner de câmera** — Usa `getUserMedia` + canvas para capturar frames e decodificar com `jsQR`
+5. **Upload de imagem** — Alternativa ao scanner: usuário escolhe imagem do QR code
+6. **Modal de pedido** — Ao detectar um QR de produto, abre modal com formulário completo:
+   - Nome do cliente
+   - Quantidade
+   - Cidade, endereço, bairro, CEP
+   - Código de rastreio, modalidade de envio
+   - Referência do pedido
+   - Valida estoque antes de confirmar
+   - Salva transação no Supabase com formato `packLocation()` padrão
+
+**Dependência adicionada:** `jsqr@^1.4.0` (para decodificar QR codes de câmera/imagem)
+
+**Build:** ✅ 1105 modules transformados. Novo bundle: `dist/assets/index-D-y6s_5N.js` + `index-CJLCk9s-.css`.
+`dist/index.html` atualizado para referenciar o novo JS bundle.
+
+**Git:** Commit `92c3f29` — "feat: add QR Code manager page with camera scanner and stock deduction"
+
+---
+
+### [2026-04-17] — Luna se torna um Agente Autônomo (Function Calling + Vision + Cross-Selling)
+
+**Solicitado:** Elevar a Luna de um chat simples para um agente autônomo com visão, chamada de funções reais e análise preditiva de mercado.
+
+**Arquivos alterados:**
+
+#### `src/lib/lunaTools.js` (reescrito por completo)
+- **`LUNA_SYSTEM`** reescrito: Luna agora é "Gerente de Operações e Especialista em Growth", com seções explícitas de Fluxo de Leitura de Imagem, Análise de Calor e Regras de Personalidade.
+- **6 ferramentas de Function Calling** com schemas completos:
+  - `updateInventory(productName, quantity, action, reason)` — entrada/saída + transação automática
+  - `getSalesData(city, topProducts, topCities, timeframe)` — agora suporta filtro por período ("hoje"/"semana"/"mes")
+  - `analyzeMarketOpportunity(city, limit)` — cruza `transactions` com `prospectionLeads` para cross-selling
+  - `findCustomer(name)` — agora retorna histórico de compras e total gasto
+  - `createOrder(...)` — suporta `orderId`, `rastreio`, `modalidade` além de produto/cliente/quantidade
+  - `deleteRecord(table, id, name)` — inalterado
+- **`createToolExecutor({ ..., transactions, prospectionLeads })`** — agora recebe `transactions` e `prospectionLeads` via closure, que eram necessários para `getSalesData` e `analyzeMarketOpportunity`
+
+#### `src/App.jsx`
+- Importa `createToolExecutor` de `lunaTools`
+- `handleSendMessage(text, imageData)` — agora aceita `imageData` como 2º parâmetro
+- Cria `toolExecutor` dentro do callback com o estado atual do app
+- Passa `imageData` e `toolExecutor` para `sendMessageToGemini` (que já tinha o loop de function calling)
+- Adiciona `imagePreview`/`imageName` no objeto de mensagem do usuário
+- Chat FAB agora mostra "🤖 Luna • Agente" 
+- Header do chat mostra badge "AGENTE AUTÔNOMO" com animação de pulso verde
+- `ChatMessage` recebe `imagePreview` e `imageName` como props
+
+#### `src/components/ChatMessage.jsx` (reescrito)
+- Exibe thumbnail da imagem enviada pelo usuário na bolha da conversa
+- Mantém compatibilidade com mensagens sem imagem
+
+#### `src/index.css`
+- `.luna-agent-badge` + `@keyframes agentPulse` — badge verde pulsante no header
+- `.tool-call-indicator` — indicador de "ferramenta sendo chamada" (para uso futuro)
+- `.opportunity-card` — card visual de oportunidade de cross-selling
+- `.luna-typing` — animação de 3 bolinhas para enquanto a Luna "pensa"
+- `.chat-action-btn` — botões de ação rápida dentro do chat (Confirmar / Cancelar)
+- `@keyframes imageIn` — animação suave ao exibir imagem
+
+**Arquitetura do Agente (fluxo completo):**
+```
+Usuário envia texto + (opcional) imagem base64
+  ↓
+handleSendMessage(text, imageData) no App.jsx
+  ↓
+createToolExecutor({ inventory, transactions, pessoas, ... })  ← estado atual do app
+  ↓
+sendMessageToGemini(history, text, inventory, ..., imageData, toolExecutor)
+  ↓
+Gemini 2.0 Flash processa (com Vision se imageData presente)
+  ↓
+Loop de Function Calling (max 5 iterações):
+  • Gemini solicita uma ferramenta
+  • toolExecutor[tool.name](args) executa ação real no Supabase
+  • Resultado volta para o Gemini continuar o raciocínio
+  ↓
+Resposta final em texto (markdown) é exibida no chat
+```
+
+**Capacidades adicionadas:**
+1. **Modo OCR via WhatsApp:** Usuário tira print de conversa → Luna extrai cliente, produto, quantidade, CEP → verifica estoque via `findCustomer` → oferece "Confirmar pedido?"
+2. **Análise de Calor:** `analyzeMarketOpportunity` cruza `transactions.city` com `prospectionLeads.cidade` para mostrar "5 lojas em Sorocaba nunca compraram Vaso Minimalista"
+3. **Comandos diretos:** "Adicione 10 espelhos ao estoque" → `updateInventory` executa e confirma
+4. **Métricas em tempo real:** "Qual foi o produto mais vendido esta semana em São Paulo?" → `getSalesData({city:'São Paulo', timeframe:'semana', topProducts:true})`
+
+**⚠️ Atenção para IAs futuras:**
+- O `createToolExecutor` é recriado a CADA mensagem — isso é intencional para pegar o estado mais recente do React (stale closure problem)
+- `prospectionLeads` precisa ser passado nas props do `createToolExecutor`; se não houver leads, `analyzeMarketOpportunity` retorna lista vazia
+- A chave `VITE_GROQ_API_KEY` é usada como fallback para Vision; sem ela, apenas Gemini Vision é usado

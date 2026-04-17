@@ -38,8 +38,11 @@ function OrdersMap({ transactions, inventory, isActive }) {
   const mapRef      = useRef(null);
   const markersRef  = useRef([]);
 
-  const sales = transactions.filter(t => t.type === 'saída');
-  const productList = [...new Set(sales.map(t => unpackLocation(t.itemName)?.cleanName || t.itemName.split('||')[0].trim()))];
+  const sales = transactions.filter(t => t.type === 'saída' || t.type === 'venda');
+  const productList = [...new Set(sales.map(t => {
+    const name = t.item_name || t.itemName || '';
+    return unpackLocation(name)?.cleanName || name.split('||')[0].trim();
+  }))];
 
   // Inicializa mapa com polling (CDN pode não estar pronto)
   useEffect(() => {
@@ -70,7 +73,8 @@ function OrdersMap({ transactions, inventory, isActive }) {
     markersRef.current = [];
 
     sales.forEach(t => {
-      const loc = unpackLocation(t.itemName);
+      const name = t.item_name || t.itemName;
+      const loc = unpackLocation(name);
       if (!loc || !loc.lat || !loc.lng || isNaN(loc.lat) || isNaN(loc.lng)) return;
       const color = getProductColor(loc.cleanName, inventory);
       const jitter = v => v + (Math.random() - 0.5) * 0.008;
@@ -93,7 +97,7 @@ function OrdersMap({ transactions, inventory, isActive }) {
       mapRef.current.fitBounds(group.getBounds().pad(0.3));
     }
     setTimeout(() => mapRef.current && mapRef.current.invalidateSize(), 200);
-  }, [transactions]);
+  }, [transactions, inventory]);
 
   return (
     <div style={{ marginTop: '2rem' }}>
@@ -108,6 +112,7 @@ function OrdersMap({ transactions, inventory, isActive }) {
       {productList.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
           {productList.map((p, i) => (
+            p && (
             <span key={p} style={{
               display: 'flex', alignItems: 'center', gap: '5px',
               background: '#f1f5f9', borderRadius: '20px',
@@ -119,7 +124,7 @@ function OrdersMap({ transactions, inventory, isActive }) {
                 flexShrink: 0, display: 'inline-block'
               }} />
               {p}
-            </span>
+            </span>)
           ))}
         </div>
       )}
@@ -144,6 +149,7 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
   const [selectedPessoa, setSelectedPessoa] = useState('');
   const [quantity, setQuantity] = useState(1);
   const [locationInput, setLocationInput] = useState('');
+  const [basket, setBasket] = useState([]);
   const [orderRef, setOrderRef] = useState('');
   const [fullAddress, setFullAddress] = useState('');
   const [bairro, setBairro] = useState('');
@@ -167,18 +173,44 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
     return tokens.every(token => itemContent.includes(token));
   });
 
+  // Adiciona o item selecionado ao cesto temporário
+  const addToBasket = () => {
+    if (!selectedItem || quantity <= 0) {
+      if (addToast) addToast("Selecione um produto e a quantidade válida.", "warning");
+      return;
+    }
+    const item = inventory.find(i => i.id === selectedItem);
+    if (!item) return;
+
+    if (item.quantity < quantity) {
+      if (addToast) addToast(`Estoque insuficiente para ${item.name}!`, "error");
+      return;
+    }
+
+    setBasket(prev => [...prev, { ...item, orderQuantity: Number(quantity) }]);
+    setSelectedItem('');
+    setProductSearch('');
+    setQuantity(1);
+  };
+
   const handleOrder = async (e) => {
     e.preventDefault();
-    if (!selectedItem || !selectedPessoa || quantity <= 0 || !locationInput) {
-      if(addToast) addToast("Por favor, preencha todos os campos do pedido.", "warning");
-      return;
+    if (basket.length === 0 && (!selectedItem || quantity <= 0)) {
+      if (addToast) addToast("Adicione pelo menos um produto ao pedido.", "warning"); return;
+    }
+    if (!selectedPessoa || !locationInput) {
+      if(addToast) addToast("Preencha o cliente e o destino.", "warning"); return;
     }
 
     setIsProcessing(true);
     setMessage('Processando pedido e localizando no mapa...');
 
     try {
-      const item = inventory.find(i => i.id === selectedItem);
+      // Se o cesto estiver vazio mas houver algo nos campos, processa como item único
+      const finalItems = basket.length > 0 ? basket : [
+        { ...inventory.find(i => i.id === selectedItem), orderQuantity: Number(quantity) }
+      ];
+
       let pessoa = pessoas.find(p => p.id === selectedPessoa || p.name.toLowerCase() === selectedPessoa.toLowerCase().trim());
       
       if (!pessoa) {
@@ -195,11 +227,13 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
         if (addToast) addToast(`Novo cliente cadastrado automaticamente: ${pessoa.name}`, "success");
       }
       
-      if (item.quantity < quantity) {
-        if(addToast) addToast("Estoque insuficiente para este pedido!", "error");
-        setIsProcessing(false);
-        setMessage('');
-        return;
+      // Validação final de estoque para todos os itens do cesto
+      for (const item of finalItems) {
+        const stockItem = inventory.find(i => i.id === item.id);
+        if (!stockItem || stockItem.quantity < item.orderQuantity) {
+          if(addToast) addToast(`Estoque insuficiente para ${item.name}!`, "error");
+          setIsProcessing(false); setMessage(''); return;
+        }
       }
 
       // 1. Geocodificação Automática (ViaCEP + Nominatim)
@@ -252,41 +286,48 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
         console.error('Erro na geocodificação:', err);
       }
 
-      // 2. Preparar "Smart String" para o mapa
-      const packedItemName = `${item.name} ||${cityOnly};${lat};${lng};${orderRef};;${locationInput.match(/\d{5}-?\d{3}/)?.[0] || ''};${fullAddress};${bairro};${rastreio};${modalidade}||`;
-      const newQuantity = Number(item.quantity) - Number(quantity);
+      // 2. Preparar Transações e Updates
+      const transactionsToInsert = [];
+      const inventoryUpdates = [];
 
-      // 3. Registrar Transação (Salvando 'city' separadamente para o histórico)
-      const newTransaction = {
-        id: Date.now().toString() + Math.random().toString(),
-        type: 'saída',
-        itemId: item.id,
-        itemName: packedItemName,
-        city: cityOnly, // <--- CAMPO CIDADE PARA O HISTÓRICO
-        quantity: quantity,
-        unitPrice: item.price,
-        totalValue: item.price * quantity,
-        personName: pessoa.name,
-        date: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
-      };
+      for (const item of finalItems) {
+        const packedItemName = `${item.name} ||${cityOnly};${lat};${lng};${orderRef};;${locationInput.match(/\d{5}-?\d{3}/)?.[0] || ''};${fullAddress};${bairro};${rastreio};${modalidade}||`;
+        const newQuantity = Number(item.quantity) - Number(item.orderQuantity);
 
-      // 4. Sincronizar Supabase
-      const { error: invError } = await supabase.from('inventory').update({ quantity: newQuantity }).eq('id', item.id);
-      const { error: traError } = await supabase.from('transactions').insert([newTransaction]);
+        transactionsToInsert.push({
+          id: Date.now().toString() + Math.random().toString(),
+          type: 'saída',
+          itemId: item.id,
+          itemName: packedItemName,
+          city: cityOnly,
+          quantity: item.orderQuantity,
+          unitPrice: item.price,
+          totalValue: item.price * item.orderQuantity,
+          personName: pessoa.name,
+          date: new Date().toLocaleDateString() + ' às ' + new Date().toLocaleTimeString()
+        });
 
-      if (invError || traError) {
-        throw new Error('Erro ao salvar no banco de dados.');
+        inventoryUpdates.push(
+          supabase.from('inventory').update({ quantity: newQuantity }).eq('id', item.id)
+        );
       }
 
-      // 5. Atualizar Estado Local
-      setInventory(prev => prev.map(i => i.id === item.id ? { ...i, quantity: newQuantity } : i));
-      setTransactions(prev => [...prev, newTransaction]);
+      // 3. Executar em paralelo no Supabase
+      await Promise.all([...inventoryUpdates, supabase.from('transactions').insert(transactionsToInsert)]);
+
+      // 4. Atualizar Estado Local
+      setInventory(prev => prev.map(invItem => {
+        const update = transactionsToInsert.find(t => t.itemId === invItem.id);
+        return update ? { ...invItem, quantity: invItem.quantity - update.quantity } : invItem;
+      }));
+      setTransactions(prev => [...prev, ...transactionsToInsert]);
 
       // Limpeza
       setSelectedItem('');
       setProductSearch('');
       setSelectedPessoa('');
       setQuantity(1);
+      setBasket([]);
       setLocationInput('');
       setOrderRef('');
       setFullAddress('');
@@ -407,31 +448,37 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
 
         <form onSubmit={handleOrder} className="bi-filter-group" style={{ gap: '1.5rem' }}>
           
-          <div className="bi-filter-group">
-            <label>BUSCAR PRODUTO (NOME OU CATEGORIA)</label>
-            <input 
-              type="text" 
-              placeholder="🔍 Comece a digitar o produto..." 
-              value={productSearch} 
-              onChange={(e) => setProductSearch(e.target.value)} 
-              className="input-field"
-              style={{ padding: '0.6rem', borderRadius: '6px', border: '1px solid #cbd5e1', marginBottom: '0.5rem' }}
-            />
-            <select 
-              value={selectedItem} 
-              onChange={(e) => setSelectedItem(e.target.value)} 
-              required
-              style={{ border: productSearch ? '2px solid #3b82f6' : '1px solid #cbd5e1' }}
-            >
-              <option value="">
-                {filteredProducts.length === 0 ? 'Nenhum produto encontrado' : 'Selecione o produto filtrado...'}
-              </option>
-              {filteredProducts.map(item => (
-                <option key={item.id} value={item.id} disabled={item.quantity <= 0}>
-                  {item.name} ({item.quantity} un.) - R$ {item.price}
-                </option>
-              ))}
-            </select>
+          {/* Seção de Seleção de Produto e Cesto */}
+          <div style={{ background: '#f8fafc', padding: '1rem', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
+            <label style={{ fontSize: '0.75rem', fontWeight: 'bold', color: '#3b82f6', display: 'block', marginBottom: '0.5rem' }}>
+              📦 PRODUTOS NO PEDIDO
+            </label>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end', marginBottom: '1rem' }}>
+              <div style={{ flex: 1 }}>
+                <input 
+                  type="text" placeholder="🔍 Buscar..." value={productSearch} 
+                  onChange={(e) => setProductSearch(e.target.value)} 
+                  style={{ width: '100%', marginBottom: '4px', padding: '0.4rem', fontSize: '0.85rem' }}
+                />
+                <select value={selectedItem} onChange={(e) => setSelectedItem(e.target.value)} style={{ width: '100%' }}>
+                  <option value="">Selecione...</option>
+                  {filteredProducts.map(i => <option key={i.id} value={i.id} disabled={i.quantity <= 0}>{i.name} ({i.quantity})</option>)}
+                </select>
+              </div>
+              <input 
+                type="number" value={quantity} onChange={(e) => setQuantity(e.target.value)} 
+                min="1" style={{ width: '60px', padding: '0.6rem' }} 
+              />
+              <button type="button" onClick={addToBasket} className="save-btn" style={{ padding: '0.6rem 1rem' }}>+</button>
+            </div>
+
+            {/* Listagem do Cesto */}
+            {basket.map((item, idx) => (
+              <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem', borderBottom: '1px solid #e2e8f0', fontSize: '0.85rem' }}>
+                <span><b>{item.orderQuantity}x</b> {item.name}</span>
+                <button type="button" onClick={() => setBasket(prev => prev.filter((_, i) => i !== idx))} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer' }}>✕</button>
+              </div>
+            ))}
           </div>
 
           <div className="bi-filter-group">

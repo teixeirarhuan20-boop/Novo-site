@@ -190,7 +190,10 @@ function App() {
           let lat = null, lng = null;
           if (orderData.location) {
             try {
-              const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(orderData.location)}&countrycodes=br&limit=1`);
+              const response = await fetch(
+                `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(orderData.location)}&countrycodes=br&limit=1`,
+                { headers: { 'User-Agent': 'MeuNegocioPro/2.0' } }
+              );
               const data = await response.json();
               if (data && data.length > 0) {
                 lat = data[0].lat;

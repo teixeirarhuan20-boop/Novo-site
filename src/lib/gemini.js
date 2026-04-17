@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
+import { LUNA_TOOLS, LUNA_SYSTEM } from './lunaTools'
 
 const geminiKey = import.meta.env.VITE_GEMINI_API_KEY
 const groqKey   = import.meta.env.VITE_GROQ_API_KEY
@@ -123,7 +124,7 @@ async function callGroq(prompt, isVision = false, base64Image = null, mimeType =
 
 async function callGeminiText(prompt) {
   if (!geminiKey) throw new Error('Chave Gemini não configurada.')
-  const models = ['gemini-1.5-flash', 'gemini-2.0-flash']
+  const models = ['gemini-2.0-flash', 'gemini-2.0-flash-lite']
 
   for (const model of models) {
     try {
@@ -152,7 +153,7 @@ async function callGeminiText(prompt) {
 
 async function callGeminiVision(prompt, base64Image, mimeType) {
   if (!geminiKey) throw new Error('Chave Gemini não configurada.')
-  const models = ['gemini-1.5-flash', 'gemini-2.0-flash']
+  const models = ['gemini-2.0-flash', 'gemini-2.0-flash-lite']
 
   for (const model of models) {
     try {
@@ -181,60 +182,157 @@ async function callGeminiVision(prompt, base64Image, mimeType) {
 
 // ─── Exports públicos ────────────────────────────────────────────────────────
 
-export async function sendMessageToGemini(history, message, inventory, onLeadCaptured, onOrderPlaced) {
-  if (!genAI) return 'Chat indisponível (chave Gemini não configurada).'
+// ─── Sanitiza histórico para o padrão Gemini (user/model alternados) ─────────
+function sanitizeHistory(history) {
+  const raw = (history || [])
+    .filter(m => m.text && !m.text.startsWith('⏳'))
+    .map(m => ({
+      role:  m.role === 'bot' ? 'model' : 'user',
+      parts: [{ text: String(m.text) }],
+    }))
 
-  try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
-
-    const inventoryList = inventory
-      .map(i => `- ${i.name} (Cat: ${i.category}, Estoque: ${i.quantity}, Preço: R$${Number(i.price).toFixed(2)})`)
-      .join('\n')
-
-    const systemPrompt = `Você é uma vendedora virtual amigável chamada Luna.
-Ajude o cliente com dúvidas, preços e pedidos. Fale português brasileiro de forma natural.
-
-INVENTÁRIO ATUAL:
-${inventoryList || 'Sem produtos cadastrados.'}
-
-Se o cliente quiser COMPRAR com nome, produto e quantidade, responda APENAS em JSON:
-{"orderType":"order","customerName":"...","productName":"...","quantity":1,"location":"...","cep":null,"address":null,"bairro":null,"orderId":null,"nf":null,"rastreio":null,"modalidade":null}
-
-Se o cliente fornecer dados de contato (lead), responda APENAS em JSON:
-{"customerName":"...","email":null,"telefone":null,"productName":null}
-
-Caso contrário, responda de forma natural e amigável.`
-
-    let geminiHistory = history
-      .map(m => ({ role: m.role === 'bot' ? 'model' : 'user', parts: [{ text: m.text }] }))
-
-    const firstUser = geminiHistory.findIndex(m => m.role === 'user')
-    geminiHistory = firstUser !== -1 ? geminiHistory.slice(firstUser) : []
-
-    const chat = model.startChat({ history: geminiHistory })
-    const result = await chat.sendMessage(`${systemPrompt}\n\nCliente: ${message}`)
-    const responseText = result.response.text()
-
-    const extracted = extractJson(responseText)
-
-    if (extracted?.orderType === 'order' && extracted.productName && extracted.quantity > 0) {
-      onOrderPlaced(extracted)
-      return `Pedido de ${extracted.quantity}x **${extracted.productName}** para **${extracted.customerName}** em ${extracted.location} registrado com sucesso!`
-    } else if (extracted?.customerName) {
-      onLeadCaptured(extracted)
-      return 'Obrigada! Anotei seus dados e em breve entraremos em contato.'
-    }
-
-    return responseText
-  } catch (err) {
-    return `Erro no chat: ${err.message}`
+  const clean = []
+  for (const msg of raw) {
+    const last = clean[clean.length - 1]
+    if (last && last.role === msg.role) continue
+    clean.push(msg)
   }
+  while (clean.length > 0 && clean[0].role !== 'user') clean.shift()
+  while (clean.length > 0 && clean[clean.length - 1].role !== 'model') clean.pop()
+  return clean
+}
+
+// ─── Luna — Agente Autônomo com Vision + Function Calling ────────────────────
+export async function sendMessageToGemini(
+  history, message, inventory,
+  onLeadCaptured, onOrderPlaced,   // legado (compatibilidade)
+  imageData    = null,             // { base64: string, mimeType: string }
+  toolExecutor = null,             // createToolExecutor(...) do lunaTools.js
+) {
+  if (!genAI) return 'Chat indisponível. Verifique a chave VITE_GEMINI_API_KEY no arquivo .env.'
+
+  const inventoryList = (inventory || [])
+    .slice(0, 25)
+    .map(i => `- ${i.name} (Estoque: ${i.quantity} un, R$${Number(i.price).toFixed(2)})`)
+    .join('\n') || 'Nenhum produto cadastrado.'
+
+  const fullSystem = `${LUNA_SYSTEM}
+
+ESTOQUE ATUAL:
+${inventoryList}`
+
+  const cleanHistory = sanitizeHistory(history)
+
+  // ── Montar partes da mensagem (texto + imagem opcional) ──
+  const parts = []
+  if (imageData?.base64) {
+    parts.push({ inlineData: { mimeType: imageData.mimeType || 'image/jpeg', data: imageData.base64 } })
+  }
+  parts.push({ text: message || 'Analise a imagem acima.' })
+
+  // ── Tentar modelos Gemini em ordem de preferência ────────
+  for (const modelName of ['gemini-2.0-flash', 'gemini-2.0-flash-lite']) {
+    try {
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        tools: toolExecutor ? LUNA_TOOLS : undefined,
+        systemInstruction: { parts: [{ text: fullSystem }] },
+      })
+
+      const chat = model.startChat({
+        history: cleanHistory,
+        generationConfig: { maxOutputTokens: 800 },
+      })
+
+      let result = await chat.sendMessage(parts)
+
+      // ── Loop de Function Calling (máx 5 iterações) ──────
+      let iterations = 0
+      while (iterations < 5) {
+        const calls = result.response.functionCalls?.() || []
+        if (!calls.length) break
+        iterations++
+
+        // Executa todas as ferramentas em paralelo
+        const toolResponses = await Promise.all(
+          calls.map(async (call) => {
+            let output
+            try {
+              if (!toolExecutor?.[call.name]) throw new Error(`Ferramenta "${call.name}" não encontrada.`)
+              output = await toolExecutor[call.name](call.args)
+            } catch (e) {
+              output = { error: e.message }
+            }
+            return {
+              functionResponse: {
+                name:     call.name,
+                response: { output: JSON.stringify(output) },
+              },
+            }
+          })
+        )
+
+        // Envia resultados de volta para o modelo continuar
+        result = await chat.sendMessage(toolResponses)
+      }
+
+      // ── Resposta final em texto ─────────────────────────
+      const text = result.response.text?.()?.trim() || ''
+      if (!text) return 'Ação executada com sucesso!'
+      return text
+
+    } catch (err) {
+      const is429 = err.message?.includes('429') || err.message?.includes('quota') || err.message?.includes('RESOURCE_EXHAUSTED')
+      if (!is429) {
+        // Erro diferente de cota — retorna imediatamente
+        return `Desculpe, tive um problema técnico. (${err.message?.slice(0, 100)})`
+      }
+      // É 429 → tenta o próximo modelo Gemini na lista
+    }
+  }
+
+  // ── Fallback: Groq (llama-3.3-70b) quando Gemini está sem cota ────────────
+  if (groqKey) {
+    try {
+      const groqMessages = [
+        { role: 'system', content: fullSystem },
+        ...(cleanHistory || []).slice(-6).map(m => ({
+          role:    m.role === 'model' ? 'assistant' : 'user',
+          content: m.parts?.[0]?.text || '',
+        })),
+        { role: 'user', content: message || 'Olá!' },
+      ]
+
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${groqKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model:       'llama-3.3-70b-versatile',
+          messages:    groqMessages,
+          max_tokens:  700,
+          temperature: 0.7,
+        }),
+      })
+
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error?.message || res.statusText)
+
+      const groqText = data.choices?.[0]?.message?.content?.trim() || ''
+      if (!groqText) throw new Error('Resposta vazia')
+
+      return `⚡ *[Modo Groq — Gemini atingiu limite de uso]*\n\n${groqText}`
+    } catch (groqErr) {
+      return `⚠️ Todos os servidores de IA estão sobrecarregados agora. Aguarde 1 minuto e tente novamente.\n\n_Erro Groq: ${groqErr.message?.slice(0, 80)}_`
+    }
+  }
+
+  return '⚠️ Limite de uso da IA Gemini atingido. Aguarde alguns minutos.\n\nDica: Adicione `VITE_GROQ_API_KEY` no seu `.env` para usar o Groq como backup automático e gratuito.'
 }
 
 export async function generateOutreachMessage(lead, inventory) {
   if (!genAI) return 'IA indisponível.'
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
     const inventoryList = inventory.slice(0, 10).map(i => `- ${i.name} (R$${Number(i.price).toFixed(2)})`).join('\n')
     const prompt = `Você é a Ana, assistente de vendas proativa.
 Crie uma mensagem de WhatsApp curta (máx 3 frases) e amigável para o lead abaixo.
@@ -248,6 +346,49 @@ Mensagem:`
     return result.response.text().trim()
   } catch {
     return 'Erro ao gerar mensagem.'
+  }
+}
+
+// ─── IA de Prospecção (Ana) ───────────────────────────────────────────────────
+export async function generateProspectionOutreach(history, userMessage, leadContext, inventory) {
+  if (!genAI) return 'IA indisponível. Configure VITE_GEMINI_API_KEY.'
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
+    const inventoryList = (inventory || []).slice(0, 15)
+      .map(i => `- ${i.name} (R$${Number(i.price || 0).toFixed(2)})`)
+      .join('\n') || 'Itens de decoração variados'
+
+    const systemContext = `Você é a Ana, especialista em prospecção e vendas de itens de decoração.
+Você ajuda o vendedor a encontrar e abordar clientes (lojas, decoradores, empresas) em todo o Brasil.
+
+Seus produtos são itens de decoração (quadros, velas, vasos, almofadas, objetos decorativos, presentes, etc.).
+
+Catálogo atual:
+${inventoryList}
+
+Lead em foco: ${leadContext || 'Nenhum lead selecionado.'}
+
+Suas habilidades:
+- Gerar mensagens de WhatsApp personalizadas e persuasivas
+- Criar scripts para Instagram DM
+- Sugerir abordagens por e-mail
+- Dar dicas de como abordar diferentes tipos de negócio (loja, decorador, empresa)
+- Identificar oportunidades de venda para cada tipo de cliente
+
+Seja direta, prática e focada em vender. Use linguagem natural, calorosa e profissional.
+Sempre que gerar uma mensagem de contato, formate claramente para o usuário poder copiar.`
+
+    // Usa histórico de até 10 mensagens para não estourar tokens
+    const safeHistory = (history || []).slice(-10)
+    const chat = model.startChat({
+      history: safeHistory.slice(0, -1),
+      generationConfig: { maxOutputTokens: 800 },
+      systemInstruction: { parts: [{ text: systemContext }] },
+    })
+    const result = await chat.sendMessage(userMessage)
+    return result.response.text().trim()
+  } catch (err) {
+    return `Erro ao gerar resposta: ${err.message}`
   }
 }
 

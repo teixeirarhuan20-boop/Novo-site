@@ -1,17 +1,12 @@
 import React, { useState, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { generateId, formatDate, normalizeText, formatCurrency } from '../utils/formatting'
+import { COLOR_PALETTE, PALETTE_NAMES, nextFreeColor } from '../utils/location'
 
-const COLORS = [
-  { name: 'Azul Real',       hex: '#2563eb' }, { name: 'Verde Esmeralda', hex: '#16a34a' },
-  { name: 'Laranja Vibrante',hex: '#d97706' }, { name: 'Vermelho Fogo',   hex: '#dc2626' },
-  { name: 'Roxo Profundo',   hex: '#7c3aed' }, { name: 'Ciano Marinho',   hex: '#0891b2' },
-  { name: 'Rosa Choque',     hex: '#db2777' }, { name: 'Cinza Ardósia',   hex: '#4b5563' },
-  { name: 'Verde Floresta',  hex: '#059669' }, { name: 'Âmbar Sol',       hex: '#b45309' },
-  { name: 'Índigo Noturno',  hex: '#4338ca' }, { name: 'Lima Limão',      hex: '#84cc16' },
-]
+// Constrói a lista de cores a partir da paleta centralizada
+const COLORS = COLOR_PALETTE.map((hex, i) => ({ hex, name: PALETTE_NAMES[i] }))
 
-const EMPTY_FORM = { name: '', category: '', quantity: '', price: '', color: COLORS[0].hex }
+const EMPTY_FORM = { name: '', category: '', quantity: '', price: '', color: '' } // cor definida dinamicamente
 
 function CurveBadge({ curve }) {
   const labels = { A: 'Curva A', B: 'Curva B', C: 'Curva C', D: 'Curva D' }
@@ -31,8 +26,12 @@ export function InventoryManager({ inventory, setInventory, transactions, setTra
   const [qtyFilter, setQtyFilter] = useState('all')
   const [sortBy,    setSortBy]    = useState('name')
 
-  const usedColors = useMemo(() => inventory.map(i => i.color).filter(Boolean), [inventory])
-  const categories = useMemo(() => [...new Set(inventory.map(i => i.category))], [inventory])
+  const usedColors  = useMemo(() => inventory.map(i => i.color).filter(Boolean), [inventory])
+  const categories  = useMemo(() => [...new Set(inventory.map(i => i.category))], [inventory])
+  const autoColor   = useMemo(() => nextFreeColor(usedColors), [usedColors])
+
+  // Garante que o form sempre tenha a próxima cor livre quando está vazio
+  const formColor = form.color || autoColor
 
   // Curva ABCD
   const curves = useMemo(() => {
@@ -74,17 +73,19 @@ export function InventoryManager({ inventory, setInventory, transactions, setTra
       })
   }, [inventory, search, catFilter, qtyFilter, sortBy])
 
+
   const addItem = useCallback(async (e) => {
     e.preventDefault()
     if (!form.name || !form.quantity || !form.price || !form.category) return
 
     const newItem = {
       id: generateId(), name: form.name, category: form.category,
-      quantity: Number(form.quantity), price: Number(form.price), color: form.color,
+      quantity: Number(form.quantity), price: Number(form.price),
+      color: formColor, // usa a cor auto-atribuída ou escolhida pelo usuário
     }
 
     setInventory(prev => [...prev, newItem])
-    setForm(EMPTY_FORM)
+    setForm(EMPTY_FORM) // ao limpar, o próximo autoColor já exclui a cor recém usada
 
     try {
       const { error } = await supabase.from('inventory').insert([newItem])
@@ -126,8 +127,12 @@ export function InventoryManager({ inventory, setInventory, transactions, setTra
   return (
     <div className="page">
       <div className="page-header">
-        <h1>📦 Controle de Estoque</h1>
-        <p>Gerencie produtos, preços e monitore a curva ABCD</p>
+        <div className="flex-between">
+          <div>
+            <h1>📦 Controle de Estoque</h1>
+            <p>Gerencie produtos, preços e monitore a curva ABCD</p>
+          </div>
+        </div>
       </div>
 
       {/* Formulário de adição */}
@@ -153,16 +158,30 @@ export function InventoryManager({ inventory, setInventory, transactions, setTra
               <label>Preço (R$)</label>
               <input type="number" value={form.price} onChange={e => setForm(p => ({ ...p, price: e.target.value }))} placeholder="0.00" step="0.01" min="0" required />
             </div>
-            <div className="form-group" style={{ maxWidth: 180 }}>
+            <div className="form-group" style={{ maxWidth: 200 }}>
               <label>Cor no Mapa</label>
               <div className="flex gap-1" style={{ alignItems: 'center' }}>
-                <select value={form.color} onChange={e => setForm(p => ({ ...p, color: e.target.value }))} style={{ flex: 1 }}>
-                  {COLORS.filter(c => !usedColors.includes(c.hex)).map(c => (
+                <select
+                  value={formColor}
+                  onChange={e => setForm(p => ({ ...p, color: e.target.value }))}
+                  style={{ flex: 1 }}
+                >
+                  {/* Cor auto-atribuída no topo */}
+                  <option value={autoColor}>⚡ Auto ({PALETTE_NAMES[COLOR_PALETTE.indexOf(autoColor)]})</option>
+                  {/* Outras cores livres */}
+                  {COLORS.filter(c => !usedColors.includes(c.hex) && c.hex !== autoColor).map(c => (
                     <option key={c.hex} value={c.hex}>{c.name}</option>
                   ))}
                 </select>
-                <div style={{ width: 20, height: 20, borderRadius: '50%', background: form.color, border: '2px solid var(--border)', flexShrink: 0 }} />
+                <div style={{
+                  width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                  background: formColor, border: '2px solid var(--border)',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+                }} />
               </div>
+              <span style={{ fontSize: '0.68rem', color: 'var(--text-faint)', marginTop: '0.15rem' }}>
+                Cor única gerada automaticamente
+              </span>
             </div>
             <div className="form-group" style={{ justifyContent: 'flex-end', flex: 0 }}>
               <button type="submit" className="btn btn-primary">Adicionar</button>
@@ -193,7 +212,6 @@ export function InventoryManager({ inventory, setInventory, transactions, setTra
       </div>
 
       {/* Tabela */}
-      {filtered.length > 0 && (
       <div className="table-wrap">
         <table>
           <thead>
@@ -208,14 +226,16 @@ export function InventoryManager({ inventory, setInventory, transactions, setTra
             </tr>
           </thead>
           <tbody>
-            {filtered.map(item => (
+            {filtered.length === 0 ? (
+              <tr><td colSpan={7} className="empty-state">Nenhum produto encontrado.</td></tr>
+            ) : filtered.map(item => (
               <tr key={item.id}>
                 {editId === item.id ? (
                   <>
                     <td>
-                      <select value={editForm.color} onChange={e => setEditForm(p => ({ ...p, color: e.target.value }))} className="inline-input" style={{ width: 140 }}>
+                      <select value={editForm.color} onChange={e => setEditForm(p => ({ ...p, color: e.target.value }))} className="inline-input" style={{ width: 160 }}>
                         {COLORS.filter(c => c.hex === item.color || !usedColors.includes(c.hex)).map(c => (
-                          <option key={c.hex} value={c.hex}>{c.name}{c.hex === item.color ? ' ✓' : ''}</option>
+                          <option key={c.hex} value={c.hex}>{c.name}{c.hex === item.color ? ' ✓ (atual)' : ''}</option>
                         ))}
                       </select>
                     </td>
@@ -252,7 +272,6 @@ export function InventoryManager({ inventory, setInventory, transactions, setTra
           </tbody>
         </table>
       </div>
-      )}
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from './lib/supabase'
 import { sendMessageToGemini } from './lib/gemini'
+import { createToolExecutor } from './lib/lunaTools'
 import { generateId, formatDate } from './utils/formatting'
 import { geocode, packLocation } from './utils/location'
 import { useToast } from './hooks/useToast'
@@ -18,9 +19,10 @@ import { PeopleManager }     from './components/PeopleManager'
 import { HistoryManager }    from './components/HistoryManager'
 import { SalesMap }          from './components/SalesMap'
 import { SystemLogManager }  from './components/SystemLogManager'
-import { LeadsManager }      from './components/LeadsManager'
-import { OutreachManager }   from './components/OutreachManager'
-import { QRCodeManager }     from './components/QRCodeManager'
+import { LeadsManager }       from './components/LeadsManager'
+import { OutreachManager }    from './components/OutreachManager'
+import { QRCodeManager }      from './components/QRCodeManager'
+import { ProspeccaoManager }  from './components/ProspeccaoManager'
 import './index.css'
 
 // ─── Verificação de configuração ────────────────────────────────────────────
@@ -35,11 +37,12 @@ export default function App() {
   const { toasts, addToast, removeToast } = useToast()
 
   // ── Estado global ──────────────────────────────────────────────────────────
-  const [inventory,     setInventory]     = useState([])
-  const [transactions,  setTransactions]  = useState([])
-  const [pessoas,       setPessoas]       = useState([])
-  const [leads,         setLeads]         = useState([])
-  const [outreachLeads, setOutreachLeads] = useState([])
+  const [inventory,        setInventory]        = useState([])
+  const [transactions,     setTransactions]     = useState([])
+  const [pessoas,          setPessoas]          = useState([])
+  const [leads,            setLeads]            = useState([])
+  const [outreachLeads,    setOutreachLeads]    = useState([])
+  const [prospectionLeads, setProspectionLeads] = useState([])
 
   // ── Chat ───────────────────────────────────────────────────────────────────
   const [messages,    setMessages]    = useState([
@@ -100,10 +103,21 @@ export default function App() {
   }, [messages, chatOpen])
 
   // ── Envio de mensagem para IA ──────────────────────────────────────────────
-  const handleSendMessage = useCallback(async (text) => {
+  const handleSendMessage = useCallback(async (text, imageData = null) => {
     const history = [...messages]
-    setMessages(prev => [...prev, { role: 'user', text }, { role: 'bot', text: '...' }])
+    // Adiciona mensagem do usuário — com preview de imagem se houver
+    const userMsg = imageData
+      ? { role: 'user', text, imagePreview: imageData.preview, imageName: imageData.name }
+      : { role: 'user', text }
+    setMessages(prev => [...prev, userMsg, { role: 'bot', text: '⏳ Luna está analisando...' }])
     setChatLoading(true)
+    let response = 'Desculpe, ocorreu um erro. Tente novamente.'
+
+    // Cria o executor de ferramentas com o estado atual do app
+    const toolExecutor = createToolExecutor({
+      inventory, transactions, pessoas, prospectionLeads,
+      setInventory, setTransactions, setPessoas, addToast,
+    })
 
     const onLeadCaptured = (data) => {
       const lead = {
@@ -166,10 +180,20 @@ export default function App() {
       }
     }
 
-    const response = await sendMessageToGemini(history, text, inventory, onLeadCaptured, onOrderPlaced)
-    setMessages(prev => [...prev.slice(0, -1), { role: 'bot', text: response }])
-    setChatLoading(false)
-  }, [messages, inventory, pessoas, addToast])
+    try {
+      response = await sendMessageToGemini(
+        history, text, inventory,
+        onLeadCaptured, onOrderPlaced,
+        imageData    || null,
+        toolExecutor,
+      )
+    } catch (err) {
+      response = `Desculpe, tive um problema técnico: ${err.message}`
+    } finally {
+      setMessages(prev => [...prev.slice(0, -1), { role: 'bot', text: response }])
+      setChatLoading(false)
+    }
+  }, [messages, inventory, transactions, pessoas, prospectionLeads, addToast, setInventory, setTransactions, setPessoas])
 
   const handleSendToAna = useCallback((lead) => {
     if (!outreachLeads.find(l => l.id === lead.id)) {
@@ -185,7 +209,7 @@ export default function App() {
   const renderTab = () => {
     const props = { inventory, setInventory, transactions, setTransactions, pessoas, setPessoas, addToast }
     switch (activeTab) {
-      case 'dashboard': return <Dashboard inventory={inventory} transactions={transactions} />
+      case 'dashboard': return <Dashboard inventory={inventory} transactions={transactions} pessoas={pessoas} prospectionLeads={prospectionLeads} />
       case 'mapa':      return <SalesMap  inventory={inventory} transactions={transactions} isActive={activeTab === 'mapa'} />
       case 'pedidos':   return <OrdersManager {...props} isActive={activeTab === 'pedidos'} />
       case 'qrcodes':   return <QRCodeManager {...props} />
@@ -194,8 +218,9 @@ export default function App() {
       case 'pessoas':   return <PeopleManager {...props} />
       case 'historico': return <HistoryManager {...props} />
       case 'logs':      return <SystemLogManager />
-      case 'leads':     return <LeadsManager leads={leads} setLeads={setLeads} onSendToAna={handleSendToAna} addToast={addToast} />
-      case 'abordagem': return <OutreachManager outreachLeads={outreachLeads} setOutreachLeads={setOutreachLeads} inventory={inventory} addToast={addToast} />
+      case 'leads':      return <LeadsManager leads={leads} setLeads={setLeads} onSendToAna={handleSendToAna} addToast={addToast} />
+      case 'abordagem':  return <OutreachManager outreachLeads={outreachLeads} setOutreachLeads={setOutreachLeads} inventory={inventory} addToast={addToast} />
+      case 'prospeccao': return <ProspeccaoManager addToast={addToast} onSendToAna={handleSendToAna} inventory={inventory} leads={prospectionLeads} setLeads={setProspectionLeads} />
       default:          return <Dashboard inventory={inventory} transactions={transactions} />
     }
   }
@@ -228,7 +253,7 @@ export default function App() {
       {/* Chat flutuante (desktop) */}
       {!chatOpen && (
         <button className="chat-fab" onClick={() => setChatOpen(true)}>
-          💬 Luna
+          🤖 Luna • Agente
         </button>
       )}
 
@@ -237,12 +262,23 @@ export default function App() {
           <div className="chat-header">
             <div className="chat-header-info">
               <div className="chat-avatar">IA</div>
-              Luna — Vendedora Virtual
+              <div>
+                <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>Luna</div>
+                <div className="luna-agent-badge">Agente Autônomo</div>
+              </div>
             </div>
             <button className="chat-close" onClick={() => setChatOpen(false)}>✕</button>
           </div>
           <div className="chat-messages">
-            {messages.map((m, i) => <ChatMessage key={i} role={m.role} text={m.text} />)}
+            {messages.map((m, i) => (
+              <ChatMessage
+                key={i}
+                role={m.role}
+                text={m.text}
+                imagePreview={m.imagePreview}
+                imageName={m.imageName}
+              />
+            ))}
             <div ref={messagesEndRef} />
           </div>
           <ChatInput onSend={handleSendMessage} disabled={chatLoading} />

@@ -28,7 +28,7 @@ function extractJson(text) {
     try {
       let obj = JSON.parse(rawJson);
       return {
-        customerName: obj.nome_cliente || obj.customerName || obj.customer_name || obj.cliente || obj.destinatario || "",
+        customerName: obj.nome_cliente || obj.customerName || obj.customer_name || obj.cliente || obj.destinatario || obj.destinatário || "",
         productName: obj.productName || obj.product_name || obj.produto || "",
         location: obj.location || obj.city || obj.cidade || "",
         cep: obj.cep || obj.postal_code || obj.postal || "",
@@ -327,7 +327,7 @@ function extractTextLocally(text) {
   // 3º Passe: "Cola" palavras-chave que o OCR separou (ex: C E P  -> CEP)
   cleanText = cleanText.replace(/\bC\s*E\s*P\b/gi, 'CEP');
   cleanText = cleanText.replace(/\bN\s*F\b/gi, 'NF');
-  cleanText = cleanText.replace(/\bR\s*A\s*S\s*T\s*R\s*E\s*I\s*O\b/gi, 'Rastreio');
+  cleanText = cleanText.replace(/\b(?:R\s*A\s*S\s*T\s*R\s*E\s*I\s*O|O\s*B\s*J\s*E\s*T\s*O)\b/gi, 'Rastreio');
 
   console.log("🧹 Texto após 3 Passes de Limpeza (Força Bruta):", cleanText);
 
@@ -341,11 +341,12 @@ function extractTextLocally(text) {
   };
 
   // Extração de Nome mais robusta para Shopee/ML/Correios
-  let customerName = extract(/(?:Cliente|Destinatário|Recebedor|Nome)[:\s]*(.+?)(?=\n|,|CEP|Bairro|$)/) || 
+  let customerName = extract(/(?:Destinatário|Recebedor|Entregar para|Nome|Cliente)[:\s]*(.+?)(?=\n|,|CEP|Bairro|$)/) || 
                      extract(/DESTINAT[ÁA]RIO\s*\n\s*([^\n]+)/) ||
-                     extract(/^([A-Z][a-zÀ-ÿ]+\s[A-Z][a-zÀ-ÿ]+(?:\s[A-Z][a-zÀ-ÿ]+)*)$/m); // Pega primeira linha que parece um nome
+                     extract(/(?<=DESTINAT[ÁA]RIO[:\s]).+/) ||
+                     extract(/^([A-ZÀ-Ÿ][a-zÀ-ÿ]+\s[A-ZÀ-Ÿ][a-zÀ-ÿ]+(?:\s[A-ZÀ-Ÿ][a-zÀ-ÿ]*)*)$/m); // Pega primeira linha que parece um nome real
 
-  const cep = extract(/CEP[:\s]*(\d{2}\.?\d{3}-?\d{3})/) || (cleanText.match(/\b\d{2}\.?\d{3}-?\d{3}\b/)?.[0]);
+  const cep = extract(/CEP[:\s]*(\d{2}\.?\d{3}-?\d{3})/) || (cleanText.match(/\b\d{2}\.?\d{3}-?\d{3}\b/)?.[0]) || (cleanText.match(/\b\d{8}\b/)?.[0]);
   const orderId = extract(/(?:Pedido|Ref|ID|Ordem)[:\s]*([#a-zA-Z0-9-]+)/) || extract(/#(\d{4,10})\b/);
   const nf = extract(/(?:NF|Nota Fiscal)[:\s]*(\d+)/);
   const rastreio = extract(/(?:Rastreio|Tracking)[:\s]*([A-Z]{2}\d{9,13}[A-Z\d]*)/) || (cleanText.match(/\b[A-Z]{2}\d{9,13}[A-Z\d]*\b/)?.[0]);
@@ -403,11 +404,8 @@ export async function analyzeOrderText(inputText, inventory, customers, isCooldo
   const isHighQuality = localData && 
                         localData.customerName && 
                         localData.customerName.length > 3 && 
-                        !localData.customerName.includes('&') &&
                         localData.cep && 
-                        localData.location &&
-                        localData.orderId && // Agora exige que tenha pedido
-                        localData.bairro;    // E exige que tenha bairro
+                        localData.location; 
 
   // Só desiste de usar IA se o texto lido localmente estiver PERFEITO
   if (isHighQuality && !groqApiKey) {
@@ -423,16 +421,18 @@ export async function analyzeOrderText(inputText, inventory, customers, isCooldo
   // 2. Manda para a IA Limpadora com prompt completo
   const promptText = `Você é um extrator de dados de etiquetas de envio brasileiras.
 
-CONTEXTO DE INVENTÁRIO (use para corrigir nomes): [${inventoryContext}]
-CONTEXTO DE CLIENTES (use para corrigir nomes): [${customerContext}]
+IMPORTANTE: A etiqueta contém um REMETENTE e um DESTINATÁRIO. 
+Sua missão é extrair APENAS os dados do DESTINATÁRIO (quem vai receber o pacote).
+Ignore os dados do remetente (quem está enviando).
 
-Leia o texto sujo de OCR abaixo e extraia APENAS dados reais. 
-IMPORTANTE: Se um campo contiver apenas símbolos (ex: "-", "—", ".") ou apenas 1 ou 2 letras soltas (ex: "o E"), ignore-o e retorne null. Não tente adivinhar dados se o texto estiver ilegível.
+Use o contexto abaixo para corrigir erros de grafia do OCR:
+PRODUTOS: [${inventoryContext}]
+CLIENTES CADASTRADOS: [${customerContext}]
 
 Retorne APENAS um objeto JSON válido (obrigatório começar com { e terminar com }) com esta estrutura:
 {
   "customerName": "Nome completo do destinatário",
-  "location": "Cidade do destinatário",
+  "location": "Cidade/UF",
   "cep": "CEP",
   "address": "Endereço completo",
   "bairro": "Bairro",
