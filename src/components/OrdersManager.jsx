@@ -4,6 +4,8 @@ import { LabelAssistant } from './LabelAssistant'
 import { BatchScanner } from './BatchScanner'
 import { geocode, packLocation, unpackLocation, jitter } from '../utils/location'
 import { generateId, formatDate, normalizeText, formatCurrency } from '../utils/formatting'
+import { analyzeText, analyzeDocument } from '../lib/gemini'
+import Tesseract from 'tesseract.js'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function parseDate(str) {
@@ -309,6 +311,8 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
 
   // ── Form state (preservado intacto) ──
   const [showLabel,      setShowLabel]      = useState(false)
+  const [dragOver,       setDragOver]       = useState(false)
+  const [dragProcessing, setDragProcessing] = useState(false)
   const [productSearch,  setProductSearch]  = useState('')
   const [selectedItem,   setSelectedItem]   = useState('')
   const [selectedPessoa, setSelectedPessoa] = useState('')
@@ -473,6 +477,44 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
     }
   }, [inventory, pessoas, setPessoas, addToast, orderRef])
 
+  // ── Drag & Drop de imagem para extração de dados ────────────────────────────
+  const handleDrop = useCallback(async (e) => {
+    e.preventDefault()
+    setDragOver(false)
+    const file = e.dataTransfer.files?.[0]
+    if (!file || !file.type.startsWith('image/')) {
+      addToast('Arraste uma imagem de etiqueta ou pedido.', 'warning')
+      return
+    }
+    setDragProcessing(true)
+    addToast('🔍 Lendo imagem...', 'info')
+    try {
+      const dataUrl = await new Promise((res, rej) => {
+        const reader = new FileReader()
+        reader.onload = ev => res(ev.target.result)
+        reader.onerror = rej
+        reader.readAsDataURL(file)
+      })
+      const { data: { text } } = await Tesseract.recognize(dataUrl, 'por')
+      let result = await analyzeText(text, inventory, pessoas)
+      if (!result || (!result.customerName && !result.location)) {
+        addToast('Refinando com IA visual...', 'info')
+        const b64 = dataUrl.split(',')[1]
+        result = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
+      }
+      if (result && (result.customerName || result.location)) {
+        await handleLabelData(result)
+        addToast('✅ Dados extraídos da imagem!', 'success')
+      } else {
+        addToast('Não foi possível extrair dados. Tente outra imagem.', 'warning')
+      }
+    } catch (err) {
+      addToast(`Erro ao processar imagem: ${err.message}`, 'error')
+    } finally {
+      setDragProcessing(false)
+    }
+  }, [inventory, pessoas, handleLabelData, addToast])
+
   const handleOrder = useCallback(async (e) => {
     e.preventDefault()
     if (!selectedItem || !selectedPessoa || quantity <= 0 || !location) {
@@ -574,6 +616,35 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
               <hr className="divider" />
             </>
           )}
+
+          {/* ── Zona de Drag & Drop ── */}
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={handleDrop}
+            style={{
+              border: `2px dashed ${dragOver ? '#2563eb' : '#cbd5e1'}`,
+              borderRadius: 10,
+              padding: '0.85rem 1rem',
+              marginBottom: '0.5rem',
+              background: dragOver ? '#eff6ff' : dragProcessing ? '#f8fafc' : 'transparent',
+              display: 'flex', alignItems: 'center', gap: '0.75rem',
+              transition: 'all 0.18s',
+              cursor: 'default',
+            }}
+          >
+            <span style={{ fontSize: '1.6rem', lineHeight: 1 }}>
+              {dragProcessing ? '⏳' : dragOver ? '📂' : '🖼️'}
+            </span>
+            <div>
+              <p style={{ margin: 0, fontSize: '0.82rem', fontWeight: 600, color: dragOver ? '#2563eb' : '#475569' }}>
+                {dragProcessing ? 'Extraindo dados...' : dragOver ? 'Solte para extrair dados' : 'Arraste uma foto da etiqueta aqui'}
+              </p>
+              <p style={{ margin: 0, fontSize: '0.73rem', color: '#94a3b8' }}>
+                Os campos do formulário serão preenchidos automaticamente
+              </p>
+            </div>
+          </div>
 
           <form onSubmit={handleOrder} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
             <div className="form-group">

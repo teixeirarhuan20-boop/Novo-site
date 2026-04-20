@@ -273,12 +273,12 @@ function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct,
       </div>
 
       {/* Dados da etiqueta */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.2rem 1rem', fontSize: '0.81rem', marginBottom: '0.6rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.2rem 1rem', fontSize: '0.81rem', marginBottom: '0.6rem', color: '#1e293b' }}>
         {labelData?.customerName && <span>👤 <b>{labelData.customerName}</b></span>}
         {labelData?.location     && <span>📍 {labelData.location}</span>}
         {labelData?.cep          && <span>📮 {labelData.cep}</span>}
         {labelData?.bairro       && <span>🏘️ {labelData.bairro}</span>}
-        {labelData?.rastreio     && <span style={{ gridColumn: 'span 2', fontFamily: 'monospace', fontSize: '0.78rem' }}>📦 {labelData.rastreio}</span>}
+        {labelData?.rastreio     && <span style={{ gridColumn: 'span 2', fontFamily: 'monospace', fontSize: '0.78rem', color: '#1e293b' }}>📦 {labelData.rastreio}</span>}
         {labelData?.orderId      && <span>🔖 {labelData.orderId}</span>}
         {labelData?.modalidade   && <span>🚚 {labelData.modalidade}</span>}
         {status === 'loading' && <span style={{ gridColumn: 'span 2', color: 'var(--text-muted)' }}>Processando dados...</span>}
@@ -615,6 +615,11 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
           subtitle="Aponte para o QR Code da embalagem — leitura automática"
           onScan={(data) => handleQrScan(data, qrCamera.orderId)}
           onClose={() => setQrCamera(null)}
+        />
+      )}
+    </div>
+  )
+}
         />
       )}
     </div>
