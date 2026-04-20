@@ -10,6 +10,8 @@ const NAV = [
   { id: 'entrada',   icon: '🔁', label: 'Movimentações' },
   { section: 'GESTÃO' },
   { id: 'estoque',   icon: '📦', label: 'Estoque' },
+  { id: 'vidros',    icon: '🪟', label: 'Vidros' },
+  { id: 'pecas',     icon: '🔧', label: 'Peças' },
   { id: 'pessoas',   icon: '👥', label: 'Pessoas / CRM' },
   { id: 'historico', icon: '📜', label: 'Histórico' },
   { section: 'PROSPECÇÃO' },

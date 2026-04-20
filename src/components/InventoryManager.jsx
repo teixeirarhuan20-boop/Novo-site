@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { generateId, formatDate, normalizeText, formatCurrency } from '../utils/formatting'
 import { COLOR_PALETTE, PALETTE_NAMES, nextFreeColor } from '../utils/location'
+import { exportTXT, exportPDF } from '../utils/exportReport'
 
 // Constrói a lista de cores a partir da paleta centralizada
 const COLORS = COLOR_PALETTE.map((hex, i) => ({ hex, name: PALETTE_NAMES[i] }))
@@ -61,7 +62,7 @@ export function InventoryManager({ inventory, setInventory, transactions, setTra
         const q = Number(item.quantity)
         const matchQty    = qtyFilter === 'all' ? true
           : qtyFilter === 'in_stock'  ? q > 0
-          : qtyFilter === 'low_stock' ? q > 0 && q < 5
+          : qtyFilter === 'low_stock' ? q > 0 && q < 10
           : q === 0
         return matchSearch && matchCat && matchQty
       })
@@ -127,10 +128,49 @@ export function InventoryManager({ inventory, setInventory, transactions, setTra
   return (
     <div className="page">
       <div className="page-header">
-        <div className="flex-between">
+        <div className="flex-between" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
           <div>
             <h1>📦 Controle de Estoque</h1>
             <p>Gerencie produtos, preços e monitore a curva ABCD</p>
+          </div>
+          {/* ── Botões de Exportação ── */}
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.4px' }}>
+              Exportar:
+            </span>
+            <button
+              type="button"
+              onClick={() => exportTXT(inventory, 'Estoque')}
+              title="Baixar relatório em texto simples"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '0.4rem 0.85rem', borderRadius: 8,
+                border: '1.5px solid #e2e8f0', background: '#f8fafc',
+                color: '#374151', fontSize: '0.78rem', fontWeight: 700,
+                cursor: 'pointer', transition: 'all 0.15s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = '#2563eb'; e.currentTarget.style.color = '#2563eb' }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = '#e2e8f0'; e.currentTarget.style.color = '#374151' }}
+            >
+              📄 TXT
+            </button>
+            <button
+              type="button"
+              onClick={() => exportPDF(inventory, 'Estoque')}
+              title="Abrir relatório para imprimir ou salvar como PDF"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '0.4rem 0.85rem', borderRadius: 8,
+                border: '1.5px solid #2563eb', background: '#2563eb',
+                color: '#fff', fontSize: '0.78rem', fontWeight: 700,
+                cursor: 'pointer', transition: 'all 0.15s',
+                boxShadow: '0 2px 6px rgba(37,99,235,0.3)',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#1d4ed8' }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#2563eb' }}
+            >
+              📑 PDF
+            </button>
           </div>
         </div>
       </div>
@@ -256,7 +296,7 @@ export function InventoryManager({ inventory, setInventory, transactions, setTra
                     <td><CurveBadge curve={curves[item.id] || 'D'} /></td>
                     <td className="text-muted">{item.category}</td>
                     <td>
-                      <span className={`badge ${Number(item.quantity) === 0 ? 'badge-red' : Number(item.quantity) < 5 ? 'badge-orange' : 'badge-green'}`}>
+                      <span className={`badge ${Number(item.quantity) === 0 ? 'badge-red' : Number(item.quantity) < 10 ? 'badge-orange' : 'badge-green'}`}>
                         {Number(item.quantity)} un.
                       </span>
                     </td>

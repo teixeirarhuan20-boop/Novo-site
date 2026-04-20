@@ -1,9 +1,11 @@
 import React, { useState } from 'react'
 import { generateOutreachMessage } from '../lib/gemini'
+import { AnaBatchFlow } from './AnaBatchFlow'
 
-export function OutreachManager({ outreachLeads, setOutreachLeads, inventory, addToast }) {
+export function OutreachManager({ outreachLeads, setOutreachLeads, inventory, setInventory, transactions, setTransactions, pessoas, setPessoas, addToast }) {
   const [messages,    setMessages]    = useState({})
   const [generating,  setGenerating]  = useState({})
+  const [batchOpen,   setBatchOpen]   = useState(false)
 
   const generateMessage = async (lead) => {
     setGenerating(prev => ({ ...prev, [lead.id]: true }))
@@ -39,10 +41,46 @@ export function OutreachManager({ outreachLeads, setOutreachLeads, inventory, ad
   }
 
   return (
+    <>
+      {/* ── Modo Lote Contínuo (overlay fullscreen) ── */}
+      {batchOpen && (
+        <AnaBatchFlow
+          inventory={inventory}
+          setInventory={setInventory}
+          transactions={transactions}
+          setTransactions={setTransactions}
+          pessoas={pessoas}
+          setPessoas={setPessoas}
+          addToast={addToast}
+          onClose={() => setBatchOpen(false)}
+        />
+      )}
+
     <div className="page">
       <div className="page-header">
-        <h1>📣 Abordagem — Ana</h1>
-        <p>Gere mensagens personalizadas com IA e envie pelo WhatsApp</p>
+        <div className="flex-between" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
+          <div>
+            <h1>📣 Abordagem — Ana</h1>
+            <p>Gere mensagens personalizadas com IA e envie pelo WhatsApp</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setBatchOpen(true)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '0.55rem 1.1rem', borderRadius: 10,
+              border: '2px solid #7c3aed', background: '#7c3aed',
+              color: '#fff', fontSize: '0.85rem', fontWeight: 700,
+              cursor: 'pointer', transition: 'all 0.15s',
+              boxShadow: '0 2px 8px rgba(124,58,237,0.35)',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = '#6d28d9'; e.currentTarget.style.borderColor = '#6d28d9' }}
+            onMouseLeave={e => { e.currentTarget.style.background = '#7c3aed'; e.currentTarget.style.borderColor = '#7c3aed' }}
+            title="Ativar modo de leitura em lote automática com câmera"
+          >
+            🔄 Modo Lote Contínuo
+          </button>
+        </div>
       </div>
 
       {outreachLeads.length === 0 ? (
@@ -126,5 +164,6 @@ export function OutreachManager({ outreachLeads, setOutreachLeads, inventory, ad
         </div>
       )}
     </div>
+    </>
   )
 }

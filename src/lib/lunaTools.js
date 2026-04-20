@@ -157,6 +157,7 @@ export const LUNA_TOOLS = [{ functionDeclarations: LUNA_TOOL_DECLARATIONS }]
 export function createToolExecutor({
   inventory, transactions, pessoas, prospectionLeads,
   setInventory, setTransactions, setPessoas, addToast,
+  onStructuredMessage = null,   // callback para injetar cards estruturados no chat
 }) {
 
   // ── updateInventory ──────────────────────────────────────────────────────
@@ -375,10 +376,18 @@ export function createToolExecutor({
       }
     }
 
+    const summary = `Encontrei ${limited.length} oportunidade(s) de cross-selling. A maior é em **${limited[0].city}**: ${limited[0].untappedLeads} leads não alcançados, e o produto mais vendido lá é "${limited[0].topProduct}" (${limited[0].unitsSold} un vendidas).`
+
+    // Emite card estruturado no chat (renderizado pelo ChatMessage)
+    onStructuredMessage?.({
+      type:  'market_opportunity',
+      data:  { opportunities: limited, summary },
+    })
+
     return {
       opportunities: limited,
       total:         limited.length,
-      summary: `Encontrei ${limited.length} oportunidade(s) de cross-selling. A maior é em **${limited[0].city}**: ${limited[0].untappedLeads} leads não alcançados, e o produto mais vendido lá é "${limited[0].topProduct}" (${limited[0].unitsSold} un vendidas).`,
+      summary,
     }
   }
 

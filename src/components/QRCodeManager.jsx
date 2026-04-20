@@ -230,7 +230,7 @@ export function QRCodeManager({ inventory, setInventory, transactions, setTransa
   // ── Cor do badge de estoque ───────────────────────────────────────────────
   const stockBadge = (qty) => {
     if (qty <= 0)  return 'badge badge-red'
-    if (qty < 5)   return 'badge badge-orange'
+    if (qty < 10)  return 'badge badge-orange'
     return 'badge badge-green'
   }
 

@@ -1,9 +1,126 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react'
-import { analyzeOrderText } from '../gemini'
+import { analyzeText, analyzeDocument } from '../lib/gemini'
 import { supabase } from '../lib/supabase'
 import { generateId, formatDate, formatCurrency } from '../utils/formatting'
 import { geocode, packLocation } from '../utils/location'
 import Tesseract from 'tesseract.js'
+import jsQR from 'jsqr'
+
+// ─── Modal de QR Code em tempo real ──────────────────────────────────────────
+function QrScannerModal({ title, subtitle, onScan, onClose }) {
+  const [msg, setMsg] = useState('Iniciando câmera...')
+  const [active, setActive] = useState(false)
+  const videoRef  = useRef(null)
+  const canvasRef = useRef(null)
+  const streamRef = useRef(null)
+  const rafRef    = useRef(null)
+  const foundRef  = useRef(false)
+
+  useEffect(() => {
+    startCam()
+    return () => stopCam()
+  }, [])
+
+  async function startCam() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 } }
+      })
+      streamRef.current = stream
+      videoRef.current.srcObject = stream
+      await videoRef.current.play()
+      setActive(true)
+      setMsg('Aponte para o QR Code do produto')
+      scanLoop()
+    } catch {
+      setMsg('❌ Câmera não disponível.')
+    }
+  }
+
+  function stopCam() {
+    cancelAnimationFrame(rafRef.current)
+    streamRef.current?.getTracks().forEach(t => t.stop())
+  }
+
+  function scanLoop() {
+    const video  = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || !canvas) return
+
+    const tick = () => {
+      if (foundRef.current) return
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width  = video.videoWidth
+        canvas.height = video.videoHeight
+        const ctx = canvas.getContext('2d')
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+        const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' })
+        if (code?.data) {
+          foundRef.current = true
+          setMsg(`✅ QR detectado!`)
+          stopCam()
+          onScan(code.data)
+          return
+        }
+      }
+      rafRef.current = requestAnimationFrame(tick)
+    }
+    rafRef.current = requestAnimationFrame(tick)
+  }
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 3000, padding: '1rem',
+    }}>
+      <div className="card" style={{ maxWidth: 460, width: '100%', margin: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: '1rem' }}>{title}</h3>
+            {subtitle && <p style={{ margin: 0, fontSize: '0.76rem', color: 'var(--text-muted)' }}>{subtitle}</p>}
+          </div>
+          <button className="btn btn-secondary btn-sm" onClick={() => { stopCam(); onClose() }}>✕</button>
+        </div>
+
+        <div style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', background: '#0f172a', height: '320px' }}>
+          <video ref={videoRef} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted playsInline />
+          {active && (
+            <div style={{
+              position: 'absolute', top: '50%', left: '50%',
+              transform: 'translate(-50%,-50%)',
+              width: '65%', height: '65%',
+              border: '2px solid #10b981', borderRadius: 12,
+              boxShadow: '0 0 0 9999px rgba(0,0,0,0.5)',
+              pointerEvents: 'none',
+            }}>
+              {/* Cantos decorativos */}
+              {[['0','0'],['0','auto'],['auto','0'],['auto','auto']].map(([t,b], i) => (
+                <div key={i} style={{
+                  position:'absolute',
+                  top: t !== 'auto' ? -2 : 'auto', bottom: b !== 'auto' ? -2 : 'auto',
+                  left: i < 2 ? -2 : 'auto', right: i >= 2 ? -2 : 'auto',
+                  width: 20, height: 20,
+                  borderTop:    (i === 0 || i === 2) ? '3px solid #10b981' : 'none',
+                  borderBottom: (i === 1 || i === 3) ? '3px solid #10b981' : 'none',
+                  borderLeft:   (i === 0 || i === 1) ? '3px solid #10b981' : 'none',
+                  borderRight:  (i === 2 || i === 3) ? '3px solid #10b981' : 'none',
+                }} />
+              ))}
+            </div>
+          )}
+        </div>
+        <canvas ref={canvasRef} style={{ display: 'none' }} />
+
+        <p style={{ textAlign: 'center', fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0.75rem 0 0.25rem' }}>{msg}</p>
+        <p style={{ textAlign: 'center', fontSize: '0.72rem', color: 'var(--text-muted)', margin: 0 }}>
+          Leitura automática · sem precisar capturar
+        </p>
+      </div>
+    </div>
+  )
+}
 
 // ─── Modal de câmera reutilizável ─────────────────────────────────────────────
 function CameraModal({ title, subtitle, onCapture, onClose }) {
@@ -246,71 +363,85 @@ function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct,
 export function BatchScanner({ inventory, setInventory, transactions, setTransactions, pessoas, setPessoas, addToast }) {
   const [orders, setOrders] = useState([])
   const [camera, setCamera] = useState(null) // null | { mode: 'label' | 'product', orderId? }
+  const [qrCamera, setQrCamera] = useState(null) // null | { orderId }
 
   // ── Abre câmera para ler etiqueta ───────────────────────────────────────────
   const openLabelScan = () => setCamera({ mode: 'label' })
 
-  // ── Abre câmera para ler QR do produto em um pedido específico ──────────────
-  const openProductScan = (orderId) => setCamera({ mode: 'product', orderId })
+  // ── Abre scanner QR para o produto de um pedido específico ─────────────────
+  const openProductScan = (orderId) => setQrCamera({ orderId })
 
-  // ── Callback quando QR é decodificado ──────────────────────────────────────
+  // ── Callback quando QR do produto é lido ───────────────────────────────────
+  const handleQrScan = useCallback((qrData, orderId) => {
+    setQrCamera(null)
+    const lower = qrData.toLowerCase().trim()
+
+    // Tenta associar o conteúdo do QR a um produto do estoque
+    const product = inventory.find(p =>
+      lower.includes(p.id?.toLowerCase()) ||
+      lower.includes(p.name?.toLowerCase()) ||
+      p.name?.toLowerCase().includes(lower.split(/[\n|,]/)[0].trim())
+    )
+
+    if (product) {
+      setOrders(prev => prev.map(o => o.id === orderId
+        ? { ...o, productData: product, status: 'ready' }
+        : o
+      ))
+      addToast(`🏷️ Produto: ${product.name}`, 'success')
+    } else {
+      // QR não bateu com nenhum produto — salva o texto cru para o usuário ver
+      addToast(`QR lido (${qrData.slice(0, 40)}...). Selecione o produto manualmente.`, 'warning')
+    }
+  }, [inventory, addToast])
+
+  // ── Callback quando foto de etiqueta é capturada ────────────────────────────
   const handleCapture = useCallback(async (imageData) => {
     const mode = camera?.mode;
     const targetOrderId = camera?.orderId;
     setCamera(null)
 
     if (mode === 'label') {
-      // Cria entry provisória
       const tempId = generateId()
       setOrders(prev => [...prev, { id: tempId, status: 'loading', labelData: null, productData: null, quantity: 1 }])
 
       try {
-        // Processamento OCR via Tesseract
-        const { data: { text } } = await Tesseract.recognize(imageData, 'por');
-        console.log("📝 Texto extraído da câmera:", text);
+        // 1) OCR local (Tesseract) — offline e gratuito
+        const { data: { text } } = await Tesseract.recognize(imageData, 'por')
+        const data = await analyzeText(text, inventory, pessoas)
 
-        const data = await analyzeOrderText(text, inventory, pessoas);
-        
-        if (data && (data.customerName || data.location)) {
+        if (data && (data.customerName || data.location || data.orderId)) {
           setOrders(prev => prev.map(o => o.id === tempId
             ? { ...o, labelData: data, status: 'needs_product' }
             : o
-          ));
-          addToast(`✅ Destinatário: ${data.customerName || 'Identificado'}`, 'success');
+          ))
+          addToast(`✅ Destinatário: ${data.customerName || 'Identificado'}`, 'success')
+          // 🔁 Abre scanner QR para identificar o produto automaticamente
+          setQrCamera({ orderId: tempId })
+          return
+        }
+
+        // 2) Fallback Vision AI — quando Tesseract não extrai dados suficientes
+        addToast('Refinando com IA visual...', 'info')
+        const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
+        const visionData = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
+        if (visionData && (visionData.customerName || visionData.location)) {
+          setOrders(prev => prev.map(o => o.id === tempId
+            ? { ...o, labelData: visionData, status: 'needs_product' }
+            : o
+          ))
+          addToast(`✅ Lido pela IA: ${visionData.customerName || 'OK'}`, 'success')
+          // 🔁 Abre scanner QR para identificar o produto automaticamente
+          setQrCamera({ orderId: tempId })
         } else {
-          throw new Error("Não foi possível identificar o destinatário.");
+          throw new Error('Não foi possível identificar o destinatário. Tente outra foto.')
         }
       } catch (err) {
-        console.error("Erro OCR:", err);
-        setOrders(prev => prev.filter(o => o.id !== tempId));
-        addToast(`Falha na leitura: ${err.message}`, 'error');
+        setOrders(prev => prev.filter(o => o.id !== tempId))
+        addToast(`Falha na leitura: ${err.message}`, 'error')
       }
     }
 
-    if (mode === 'product' && targetOrderId) {
-      try {
-        const { data: { text } } = await Tesseract.recognize(imageData, 'por');
-        const lower = text.toLowerCase().trim();
-
-        // Busca o produto pelo nome dentro do texto extraído da foto
-        const product = inventory.find(p => 
-          lower.includes(p.name.toLowerCase()) || 
-          p.name.toLowerCase().includes(lower.split('\n')[0])
-        );
-
-      if (product) {
-        setOrders(prev => prev.map(o => o.id === targetOrderId
-          ? { ...o, productData: product, status: 'ready' }
-          : o
-        ))
-        addToast(`🏷️ Produto: ${product.name}`, 'success')
-      } else {
-        addToast('Produto não encontrado. Selecione manualmente.', 'warning')
-      }
-      } catch (err) {
-        addToast('Erro ao processar imagem do produto.', 'error')
-      }
-    }
   }, [camera, inventory, pessoas, addToast, setOrders])
 
   // ── Seleciona produto manualmente ───────────────────────────────────────────
@@ -403,7 +534,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       {/* Toolbar */}
       <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
         <button className="btn btn-primary" onClick={openLabelScan} style={{ gap: '0.4rem' }}>
-          📷 Escanear Texto da Etiqueta
+          📷 Adicionar Etiqueta
         </button>
 
         {readyCount > 1 && (
@@ -438,14 +569,14 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
           <div style={{ fontSize: '3rem', marginBottom: '0.75rem' }}>📷</div>
           <p style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '0.4rem' }}>Nenhuma etiqueta na fila</p>
           <p style={{ fontSize: '0.82rem', marginBottom: '1.25rem', lineHeight: 1.6 }}>
-            Clique em <b>"Escanear Texto da Etiqueta"</b> para ler os dados impressos.<br/>
-            O sistema identificará Cliente, CEP e Cidade automaticamente.
+            Clique em <b>"Adicionar Etiqueta"</b> e use a câmera ou selecione uma foto da galeria.<br/>
+            O sistema identifica Cliente, CEP e Cidade automaticamente.
           </p>
           <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
             <span>📦 Shopee</span><span>·</span>
             <span>📮 Correios</span><span>·</span>
             <span>🚚 Jadlog</span><span>·</span>
-            <span>📋 Qualquer QR</span>
+            <span>📋 Mercado Livre</span>
           </div>
         </div>
       )}
@@ -466,15 +597,24 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
         ))}
       </div>
 
-      {/* Modal da câmera */}
+
+      {/* Modal da câmera (etiqueta) */}
       {camera && (
         <CameraModal
-          title={camera.mode === 'label' ? '📷 Scanner de Texto' : '🏷️ Identificar Produto'}
-          subtitle={camera.mode === 'label'
-            ? 'Enquadre o texto do destinatário da etiqueta'
-            : 'Fotografe a embalagem ou código do produto'}
+          title="📷 Scanner de Etiqueta"
+          subtitle="Enquadre o texto do destinatário da etiqueta"
           onCapture={handleCapture}
           onClose={() => setCamera(null)}
+        />
+      )}
+
+      {/* Modal QR Code (produto) */}
+      {qrCamera && (
+        <QrScannerModal
+          title="🏷️ QR Code do Produto"
+          subtitle="Aponte para o QR Code da embalagem — leitura automática"
+          onScan={(data) => handleQrScan(data, qrCamera.orderId)}
+          onClose={() => setQrCamera(null)}
         />
       )}
     </div>

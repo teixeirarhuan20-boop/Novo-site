@@ -66,7 +66,7 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
       const q        = Number(item.quantity)
       const matchQ   = qtyFilter === 'all' ? true
         : qtyFilter === 'in_stock'  ? q > 0
-        : qtyFilter === 'low_stock' ? q > 0 && q < 5
+        : qtyFilter === 'low_stock' ? q > 0 && q < 10
         : q === 0
       return matchS && matchC && matchQ
     })
@@ -106,7 +106,7 @@ export function StockInManager({ inventory, setInventory, pessoas, transactions,
                 <tr key={item.id}>
                   <td className="font-medium">{item.name}</td>
                   <td>
-                    <span className={`badge ${Number(item.quantity) === 0 ? 'badge-red' : Number(item.quantity) < 5 ? 'badge-orange' : 'badge-green'}`}>
+                    <span className={`badge ${Number(item.quantity) === 0 ? 'badge-red' : Number(item.quantity) < 10 ? 'badge-orange' : 'badge-green'}`}>
                       {item.quantity} un.
                     </span>
                   </td>

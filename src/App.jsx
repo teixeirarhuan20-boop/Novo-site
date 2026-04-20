@@ -23,6 +23,8 @@ import { LeadsManager }       from './components/LeadsManager'
 import { OutreachManager }    from './components/OutreachManager'
 import { QRCodeManager }      from './components/QRCodeManager'
 import { ProspeccaoManager }  from './components/ProspeccaoManager'
+import { GlassManager }       from './components/GlassManager'
+import { PartsManager }       from './components/PartsManager'
 import './index.css'
 
 // ─── Verificação de configuração ────────────────────────────────────────────
@@ -43,6 +45,8 @@ export default function App() {
   const [leads,            setLeads]            = useState([])
   const [outreachLeads,    setOutreachLeads]    = useState([])
   const [prospectionLeads, setProspectionLeads] = useState([])
+  const [vidros,           setVidros]           = useState([])
+  const [pecas,            setPecas]            = useState([])
 
   // ── Chat ───────────────────────────────────────────────────────────────────
   const [messages,    setMessages]    = useState([
@@ -50,7 +54,8 @@ export default function App() {
   ])
   const [chatOpen,    setChatOpen]    = useState(false)
   const [chatLoading, setChatLoading] = useState(false)
-  const messagesEndRef = useRef(null)
+  const messagesEndRef          = useRef(null)
+  const pendingStructuredMsgs   = useRef([])   // fila de cards estruturados da Luna
 
   // ── Carregar dados do Supabase ─────────────────────────────────────────────
   useEffect(() => {
@@ -58,17 +63,22 @@ export default function App() {
 
     const loadData = async () => {
       try {
-        const [inv, pes, tra] = await Promise.all([
+        const [inv, pes, tra, vid, pec] = await Promise.all([
           supabase.from('inventory').select('*'),
           supabase.from('pessoas').select('*'),
           supabase.from('transactions').select('*'),
+          supabase.from('vidros').select('*').order('nome'),
+          supabase.from('pecas').select('*').order('nome'),
         ])
         if (inv.error) throw inv.error
         if (pes.error) throw pes.error
         if (tra.error) throw tra.error
+        // vidros e peças: erros silenciosos (tabela pode não existir ainda)
         if (inv.data) setInventory(inv.data)
         if (pes.data) setPessoas(pes.data)
         if (tra.data) setTransactions(tra.data)
+        if (vid.data) setVidros(vid.data)
+        if (pec.data) setPecas(pec.data)
       } catch (err) {
         console.error('Erro ao carregar dados:', err)
         addToast('Erro ao carregar dados do servidor.', 'error')
@@ -92,6 +102,16 @@ export default function App() {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, ({ new: n }) => {
         setTransactions(prev => prev.find(t => t.id === n.id) ? prev : [...prev, n])
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'vidros' }, ({ eventType, new: n, old: o }) => {
+        if (eventType === 'INSERT') setVidros(prev => prev.find(i => i.id === n.id) ? prev : [...prev, n])
+        if (eventType === 'UPDATE') setVidros(prev => prev.map(i => i.id === n.id ? n : i))
+        if (eventType === 'DELETE') setVidros(prev => prev.filter(i => i.id !== o.id))
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'pecas' }, ({ eventType, new: n, old: o }) => {
+        if (eventType === 'INSERT') setPecas(prev => prev.find(i => i.id === n.id) ? prev : [...prev, n])
+        if (eventType === 'UPDATE') setPecas(prev => prev.map(i => i.id === n.id ? n : i))
+        if (eventType === 'DELETE') setPecas(prev => prev.filter(i => i.id !== o.id))
+      })
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
@@ -114,9 +134,11 @@ export default function App() {
     let response = 'Desculpe, ocorreu um erro. Tente novamente.'
 
     // Cria o executor de ferramentas com o estado atual do app
+    pendingStructuredMsgs.current = []
     const toolExecutor = createToolExecutor({
       inventory, transactions, pessoas, prospectionLeads,
       setInventory, setTransactions, setPessoas, addToast,
+      onStructuredMessage: (msg) => { pendingStructuredMsgs.current.push(msg) },
     })
 
     const onLeadCaptured = (data) => {
@@ -190,7 +212,13 @@ export default function App() {
     } catch (err) {
       response = `Desculpe, tive um problema técnico: ${err.message}`
     } finally {
-      setMessages(prev => [...prev.slice(0, -1), { role: 'bot', text: response }])
+      // Substitui o placeholder "⏳" pela resposta da Luna + quaisquer cards estruturados
+      const extraCards = pendingStructuredMsgs.current.splice(0).map(m => ({ role: 'bot', ...m }))
+      setMessages(prev => [
+        ...prev.slice(0, -1),
+        { role: 'bot', text: response },
+        ...extraCards,
+      ])
       setChatLoading(false)
     }
   }, [messages, inventory, transactions, pessoas, prospectionLeads, addToast, setInventory, setTransactions, setPessoas])
@@ -215,11 +243,13 @@ export default function App() {
       case 'qrcodes':   return <QRCodeManager {...props} />
       case 'entrada':   return <StockInManager {...props} />
       case 'estoque':   return <InventoryManager {...props} />
+      case 'vidros':    return <GlassManager vidros={vidros} setVidros={setVidros} addToast={addToast} />
+      case 'pecas':     return <PartsManager pecas={pecas} setPecas={setPecas} addToast={addToast} />
       case 'pessoas':   return <PeopleManager {...props} />
       case 'historico': return <HistoryManager {...props} />
       case 'logs':      return <SystemLogManager />
       case 'leads':      return <LeadsManager leads={leads} setLeads={setLeads} onSendToAna={handleSendToAna} addToast={addToast} />
-      case 'abordagem':  return <OutreachManager outreachLeads={outreachLeads} setOutreachLeads={setOutreachLeads} inventory={inventory} addToast={addToast} />
+      case 'abordagem':  return <OutreachManager outreachLeads={outreachLeads} setOutreachLeads={setOutreachLeads} inventory={inventory} setInventory={setInventory} transactions={transactions} setTransactions={setTransactions} pessoas={pessoas} setPessoas={setPessoas} addToast={addToast} />
       case 'prospeccao': return <ProspeccaoManager addToast={addToast} onSendToAna={handleSendToAna} inventory={inventory} leads={prospectionLeads} setLeads={setProspectionLeads} />
       default:          return <Dashboard inventory={inventory} transactions={transactions} />
     }
@@ -277,6 +307,8 @@ export default function App() {
                 text={m.text}
                 imagePreview={m.imagePreview}
                 imageName={m.imageName}
+                type={m.type}
+                data={m.data}
               />
             ))}
             <div ref={messagesEndRef} />
