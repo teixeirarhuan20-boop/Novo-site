@@ -355,14 +355,14 @@ export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }
               ['🏷️ Produto',   extractedData.productName],
             ].filter(([, v]) => v).map(([label, value]) => (
               <div key={label} style={{ minWidth: 0 }}>
-                <span style={{ color: '#94a3b8' }}>{label}:</span>
-                <div style={{ color: '#e2e8f0', fontWeight: 600, wordBreak: 'break-word' }}>{value}</div>
+                <span style={{ color: '#64748b' }}>{label}:</span>
+                <div style={{ color: '#1e293b', fontWeight: 600, wordBreak: 'break-word' }}>{value}</div>
               </div>
             ))}
             {extractedData.address && (
               <div style={{ gridColumn: '1 / -1' }}>
-                <span style={{ color: '#94a3b8' }}>🏠 Endereço:</span>
-                <div style={{ color: '#e2e8f0', fontWeight: 600 }}>{extractedData.address}</div>
+                <span style={{ color: '#64748b' }}>🏠 Endereço:</span>
+                <div style={{ color: '#1e293b', fontWeight: 600 }}>{extractedData.address}</div>
               </div>
             )}
           </div>

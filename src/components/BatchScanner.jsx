@@ -364,12 +364,19 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
   const [orders, setOrders] = useState([])
   const [camera, setCamera] = useState(null) // null | { mode: 'label' | 'product', orderId? }
   const [qrCamera, setQrCamera] = useState(null) // null | { orderId }
+  const [qrKey, setQrKey] = useState(0) // força remount do QrScannerModal a cada abertura
 
   // ── Abre câmera para ler etiqueta ───────────────────────────────────────────
   const openLabelScan = () => setCamera({ mode: 'label' })
 
   // ── Abre scanner QR para o produto de um pedido específico ─────────────────
-  const openProductScan = (orderId) => setQrCamera({ orderId })
+  const openProductScan = (orderId) => {
+    setQrCamera(null) // garante desmonte antes de remontar
+    setTimeout(() => {
+      setQrKey(k => k + 1) // novo key = componente completamente novo
+      setQrCamera({ orderId })
+    }, 80) // pequeno delay para câmera anterior liberar
+  }
 
   // ── Callback quando QR do produto é lido ───────────────────────────────────
   const handleQrScan = useCallback((qrData, orderId) => {
@@ -417,6 +424,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
           ))
           addToast(`✅ Destinatário: ${data.customerName || 'Identificado'}`, 'success')
           // 🔁 Abre scanner QR para identificar o produto automaticamente
+          setQrKey(k => k + 1)
           setQrCamera({ orderId: tempId })
           return
         }
@@ -432,6 +440,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
           ))
           addToast(`✅ Lido pela IA: ${visionData.customerName || 'OK'}`, 'success')
           // 🔁 Abre scanner QR para identificar o produto automaticamente
+          setQrKey(k => k + 1)
           setQrCamera({ orderId: tempId })
         } else {
           throw new Error('Não foi possível identificar o destinatário. Tente outra foto.')
@@ -611,6 +620,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       {/* Modal QR Code (produto) */}
       {qrCamera && (
         <QrScannerModal
+          key={qrKey}
           title="🏷️ QR Code do Produto"
           subtitle="Aponte para o QR Code da embalagem — leitura automática"
           onScan={(data) => handleQrScan(data, qrCamera.orderId)}
@@ -620,6 +630,22 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     </div>
   )
 }
+        />
+      )}
+    </div>
+  )
+}
+        />
+      )}
+
+      {/* Modal QR Code (produto) */}
+      {qrCamera && (
+        <QrScannerModal
+          key={qrKey}
+          title="🏷️ QR Code do Produto"
+          subtitle="Aponte para o QR Code da embalagem — leitura automática"
+          onScan={(data) => handleQrScan(data, qrCamera.orderId)}
+          onClose={() => setQrCamera(null)}
         />
       )}
     </div>
