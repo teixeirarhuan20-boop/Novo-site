@@ -750,6 +750,93 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
             />
           </div>
 
+          {/* ── Zona de Drag & Drop para filtrar ── */}
+          {(() => {
+            const [centralDrag,    setCentralDrag]    = React.useState(false)
+            const [centralBusy,    setCentralBusy]    = React.useState(false)
+            const [centralResult,  setCentralResult]  = React.useState(null)
+
+            const handleCentralDrop = async (e) => {
+              e.preventDefault()
+              setCentralDrag(false)
+              const file = e.dataTransfer.files?.[0]
+              if (!file || !file.type.startsWith('image/')) {
+                addToast('Arraste uma imagem de etiqueta.', 'warning')
+                return
+              }
+              setCentralBusy(true)
+              setCentralResult(null)
+              try {
+                const dataUrl = await new Promise((res, rej) => {
+                  const reader = new FileReader()
+                  reader.onload = ev => res(ev.target.result)
+                  reader.onerror = rej
+                  reader.readAsDataURL(file)
+                })
+                const { data: { text } } = await Tesseract.recognize(dataUrl, 'por')
+                let result = await analyzeText(text, inventory, pessoas)
+                if (!result || (!result.customerName && !result.location)) {
+                  const b64 = dataUrl.split(',')[1]
+                  result = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
+                }
+                if (result && (result.customerName || result.location || result.rastreio || result.orderId)) {
+                  const q = result.customerName || result.rastreio || result.orderId || result.location || ''
+                  setSearch(q)
+                  setCentralResult(result)
+                  addToast(`🔍 Filtrando por: "${q}"`, 'success')
+                } else {
+                  addToast('Não encontrei dados para filtrar. Tente outra imagem.', 'warning')
+                }
+              } catch (err) {
+                addToast(`Erro: ${err.message}`, 'error')
+              } finally {
+                setCentralBusy(false)
+              }
+            }
+
+            return (
+              <div
+                onDragOver={e => { e.preventDefault(); setCentralDrag(true) }}
+                onDragLeave={() => setCentralDrag(false)}
+                onDrop={handleCentralDrop}
+                style={{
+                  border: `2px dashed ${centralDrag ? '#2563eb' : centralResult ? '#16a34a' : '#cbd5e1'}`,
+                  borderRadius: 12,
+                  padding: '0.75rem 1.1rem',
+                  marginBottom: '0.85rem',
+                  background: centralDrag ? '#eff6ff' : centralBusy ? '#f8fafc' : centralResult ? '#f0fdf4' : '#fff',
+                  display: 'flex', alignItems: 'center', gap: '0.85rem',
+                  transition: 'all 0.18s',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+                }}
+              >
+                <span style={{ fontSize: '1.5rem', lineHeight: 1, flexShrink: 0 }}>
+                  {centralBusy ? '⏳' : centralDrag ? '📂' : centralResult ? '✅' : '🖼️'}
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ margin: 0, fontSize: '0.82rem', fontWeight: 600, color: centralDrag ? '#2563eb' : centralResult ? '#16a34a' : '#475569' }}>
+                    {centralBusy
+                      ? 'Lendo imagem...'
+                      : centralDrag
+                      ? 'Solte para filtrar pedidos'
+                      : centralResult
+                      ? `Filtrado por: "${centralResult.customerName || centralResult.rastreio || centralResult.orderId || centralResult.location}"`
+                      : 'Arraste uma foto de etiqueta para filtrar os pedidos'}
+                  </p>
+                  <p style={{ margin: 0, fontSize: '0.72rem', color: '#94a3b8' }}>
+                    {centralResult ? 'Arraste outra imagem para nova busca' : 'Extrai cliente, rastreio ou pedido automaticamente'}
+                  </p>
+                </div>
+                {centralResult && (
+                  <button
+                    onClick={() => { setCentralResult(null); setSearch('') }}
+                    style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '1rem', padding: '2px 4px', flexShrink: 0 }}
+                  >✕</button>
+                )}
+              </div>
+            )
+          })()}
+
           {/* ── Search + Filters ── */}
           <div style={{
             background: '#fff', borderRadius: 14, padding: '0.8rem 1rem',
@@ -937,6 +1024,113 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
                         onExpand={id => setExpandedId(v => v === id ? null : id)}
                         onStatusChange={s => updateStatus(t.id, s)}
                         onViewMap={tx => { setFocusTx(tx); setShowMap(true) }}
+                        onDelete={deleteTransaction}
+                        selected={selectedIds.has(t.id)}
+                        onSelect={(id, checked) => setSelectedIds(prev => {
+                          const next = new Set(prev)
+                          checked ? next.add(id) : next.delete(id)
+                          return next
+                        })}
+                        batchMode={batchMode}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Mapa retrátil */}
+            {showMap && (
+              <div style={{ borderTop: '1px solid #f1f5f9' }}>
+                <div style={{ padding: '0.6rem 1.2rem', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b' }}>
+                    🗺️ Mapa de Pedidos {focusTx ? `— focado em ${focusTx.personName}` : `— ${sales.filter(t => unpackLocation(t.itemName)?.lat).length} pontos`}
+                  </span>
+                  {focusTx && (
+                    <button onClick={() => setFocusTx(null)} style={{ fontSize: '0.7rem', padding: '2px 8px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', cursor: 'pointer', color: '#64748b' }}>
+                      ✕ Resetar foco
+                    </button>
+                  )}
+                </div>
+                <OrdersMap transactions={transactions} focusTx={focusTx} />
+              </div>
+            )}
+          </div>
+
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Estilos utilitários ──────────────────────────────────────────────────────
+function selStyle(active) {
+  return {
+    fontSize: '0.78rem', padding: '0.38rem 0.65rem', borderRadius: 8, cursor: 'pointer',
+    border: `1.5px solid ${active ? '#2563eb' : '#e2e8f0'}`,
+    background: active ? '#eff6ff' : '#f8fafc',
+    color: active ? '#2563eb' : '#374151',
+    fontWeight: active ? 700 : 400, outline: 'none',
+  }
+}
+
+function batchBtnStyle(bg, color, border) {
+  return {
+    padding: '4px 11px', borderRadius: 8,
+    border: `1px solid ${border}`, background: bg, color,
+    fontSize: '0.76rem', fontWeight: 700, cursor: 'pointer',
+  }
+}
+                  >
+                    ➕ Registrar primeiro pedido
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Mapa retrátil */}
+            {showMap && (
+              <div style={{ borderTop: '1px solid #f1f5f9' }}>
+                <div style={{ padding: '0.6rem 1.2rem', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b' }}>
+                    🗺️ Mapa de Pedidos {focusTx ? `— focado em ${focusTx.personName}` : `— ${sales.filter(t => unpackLocation(t.itemName)?.lat).length} pontos`}
+                  </span>
+                  {focusTx && (
+                    <button onClick={() => setFocusTx(null)} style={{ fontSize: '0.7rem', padding: '2px 8px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', cursor: 'pointer', color: '#64748b' }}>
+                      ✕ Resetar foco
+                    </button>
+                  )}
+                </div>
+                <OrdersMap transactions={transactions} focusTx={focusTx} />
+              </div>
+            )}
+          </div>
+
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Estilos utilitários ──────────────────────────────────────────────────────
+function selStyle(active) {
+  return {
+    fontSize: '0.78rem', padding: '0.38rem 0.65rem', borderRadius: 8, cursor: 'pointer',
+    border: `1.5px solid ${active ? '#2563eb' : '#e2e8f0'}`,
+    background: active ? '#eff6ff' : '#f8fafc',
+    color: active ? '#2563eb' : '#374151',
+    fontWeight: active ? 700 : 400, outline: 'none',
+  }
+}
+
+function batchBtnStyle(bg, color, border) {
+  return {
+    padding: '4px 11px', borderRadius: 8,
+    border: `1px solid ${border}`, background: bg, color,
+    fontSize: '0.76rem', fontWeight: 700, cursor: 'pointer',
+  }
+}
+={tx => { setFocusTx(tx); setShowMap(true) }}
                         onDelete={deleteTransaction}
                         selected={selectedIds.has(t.id)}
                         onSelect={(id, checked) => setSelectedIds(prev => {
