@@ -3,6 +3,7 @@ import { analyzeText, analyzeDocument } from '../lib/gemini'
 import { supabase } from '../lib/supabase'
 import { generateId, formatDate, formatCurrency } from '../utils/formatting'
 import { geocode, packLocation } from '../utils/location'
+import { hasLabelHeuristic, playBeep, preprocessCanvas } from '../utils/labelDetect'
 import Tesseract from 'tesseract.js'
 import jsQR from 'jsqr'
 
@@ -441,6 +442,212 @@ function OrderCard({ order, inventory, selected, onToggleSelect, onScanProduct, 
   )
 }
 
+// ─── Modal de leitura automática contínua ────────────────────────────────────
+function AutoScanModal({ onCapture, onClose, addToast }) {
+  const videoRef      = useRef(null)
+  const canvasRef     = useRef(null)
+  const streamRef     = useRef(null)
+  const loopRef       = useRef(null)
+  const blockedRef    = useRef(false)       // cool-down após captura
+  const seenQRsRef    = useRef(new Set())   // anti-dupe de QR codes
+  const heurSinceRef  = useRef(0)           // timestamp da primeira detecção contínua
+
+  const [status, setStatus] = useState('aguardando') // aguardando | detectando | capturado
+  const [flash,  setFlash]  = useState(false)
+  const [count,  setCount]  = useState(0)
+
+  useEffect(() => {
+    startCamera()
+    return () => stopAll()
+  }, [])
+
+  async function startCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      })
+      streamRef.current = stream
+      videoRef.current.srcObject = stream
+      await videoRef.current.play()
+      startLoop()
+    } catch {
+      addToast('Câmera não disponível.', 'error')
+      onClose()
+    }
+  }
+
+  function stopAll() {
+    clearInterval(loopRef.current)
+    streamRef.current?.getTracks().forEach(t => t.stop())
+  }
+
+  function startLoop() {
+    loopRef.current = setInterval(tick, 450)
+  }
+
+  function tick() {
+    if (blockedRef.current) return
+    const video  = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || !canvas || video.readyState < 2) return
+
+    canvas.width  = video.videoWidth
+    canvas.height = video.videoHeight
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(video, 0, 0)
+
+    // ── 1. QR Code (jsQR já importado) ──────────────────────────────────────
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    const qr = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'dontInvert' })
+
+    if (qr?.data) {
+      const key = qr.data.trim().slice(0, 60)
+      if (seenQRsRef.current.has(key)) return
+      seenQRsRef.current.add(key)
+      setTimeout(() => seenQRsRef.current.delete(key), 8000)
+      heurSinceRef.current = 0
+      doCapture(canvas)
+      return
+    }
+
+    // ── 2. Heurística de etiqueta (texto escuro em fundo claro) ─────────────
+    if (hasLabelHeuristic(canvas)) {
+      if (heurSinceRef.current === 0) {
+        heurSinceRef.current = Date.now()
+        setStatus('detectando')
+      } else if (Date.now() - heurSinceRef.current > 1600) {
+        // Detectou etiqueta por 1.6s seguidos — captura
+        heurSinceRef.current = 0
+        doCapture(canvas)
+      }
+    } else {
+      if (heurSinceRef.current !== 0) setStatus('aguardando')
+      heurSinceRef.current = 0
+    }
+  }
+
+  function doCapture(canvas) {
+    blockedRef.current = true
+    const dataUrl = preprocessCanvas(canvas)
+
+    // Flash branco + beep
+    setFlash(true)
+    setTimeout(() => setFlash(false), 280)
+    playBeep('success')
+
+    // Envia para a fila do BatchScanner
+    onCapture(dataUrl)
+    setCount(c => c + 1)
+    setStatus('capturado')
+
+    // Cool-down de 3s antes de aceitar próxima etiqueta
+    setTimeout(() => {
+      setStatus('aguardando')
+      blockedRef.current = false
+    }, 3000)
+  }
+
+  const borderColor = status === 'capturado' ? '#10b981' : status === 'detectando' ? '#f59e0b' : '#6366f1'
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 4000, background: '#000', display: 'flex', flexDirection: 'column' }}>
+
+      {/* Flash ao capturar */}
+      {flash && (
+        <div style={{
+          position: 'absolute', inset: 0, zIndex: 20, pointerEvents: 'none',
+          background: 'rgba(255,255,255,0.55)', transition: 'opacity 0.3s',
+        }} />
+      )}
+
+      <video ref={videoRef} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted playsInline />
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
+
+      {/* Guia de enquadramento */}
+      <div style={{
+        position: 'absolute', inset: 0, pointerEvents: 'none',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <div style={{
+          position: 'relative',
+          width: '84%', height: '44%', maxWidth: 440,
+          border: `2.5px solid ${borderColor}`,
+          borderRadius: 14,
+          boxShadow: `0 0 0 9999px rgba(0,0,0,0.48), 0 0 18px ${borderColor}55`,
+          transition: 'border-color 0.2s, box-shadow 0.2s',
+        }}>
+          {/* 4 cantos decorativos */}
+          {[
+            { top: -3,    left: -3,  borderTopWidth: 4,    borderLeftWidth: 4   },
+            { top: -3,    right: -3, borderTopWidth: 4,    borderRightWidth: 4  },
+            { bottom: -3, left: -3,  borderBottomWidth: 4, borderLeftWidth: 4   },
+            { bottom: -3, right: -3, borderBottomWidth: 4, borderRightWidth: 4  },
+          ].map((s, i) => (
+            <div key={i} style={{
+              position: 'absolute', width: 22, height: 22,
+              borderStyle: 'solid', borderColor,
+              borderTopWidth: 0, borderBottomWidth: 0,
+              borderLeftWidth: 0, borderRightWidth: 0,
+              ...s,
+            }} />
+          ))}
+        </div>
+      </div>
+
+      {/* Barra superior */}
+      <div style={{
+        position: 'absolute', top: 0, left: 0, right: 0,
+        padding: '1rem 1rem 2.5rem',
+        background: 'linear-gradient(to bottom, rgba(0,0,0,0.78) 0%, transparent 100%)',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+      }}>
+        <div>
+          <div style={{ color: '#fff', fontWeight: 700, fontSize: '1rem', marginBottom: 3 }}>
+            🚀 Leitura Automática
+          </div>
+          <div style={{ color: 'rgba(255,255,255,0.65)', fontSize: '0.76rem' }}>
+            {count === 0 ? 'Aponte a câmera para a etiqueta' : `${count} etiqueta(s) capturada(s)`}
+          </div>
+        </div>
+        <button
+          onClick={() => { stopAll(); onClose() }}
+          style={{
+            background: 'rgba(0,0,0,0.45)', border: '1px solid rgba(255,255,255,0.2)',
+            borderRadius: 8, color: '#fff', padding: '7px 14px',
+            cursor: 'pointer', fontSize: '0.88rem',
+          }}
+        >
+          ✕ Fechar
+        </button>
+      </div>
+
+      {/* Barra inferior — status */}
+      <div style={{
+        position: 'absolute', bottom: 0, left: 0, right: 0,
+        padding: '2.5rem 1.5rem 2rem',
+        background: 'linear-gradient(to top, rgba(0,0,0,0.82) 0%, transparent 100%)',
+        textAlign: 'center',
+      }}>
+        {status === 'aguardando' && (
+          <p style={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.88rem', margin: 0 }}>
+            📋 Enquadre a etiqueta no guia — QR Code ou texto
+          </p>
+        )}
+        {status === 'detectando' && (
+          <p style={{ color: '#f59e0b', fontSize: '0.95rem', fontWeight: 600, margin: 0 }}>
+            🔍 Etiqueta detectada — segure firme...
+          </p>
+        )}
+        {status === 'capturado' && (
+          <p style={{ color: '#10b981', fontSize: '1rem', fontWeight: 700, margin: 0 }}>
+            ✅ Capturada! Avance para a próxima etiqueta
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ─── Componente principal ─────────────────────────────────────────────────────
 export function BatchScanner({ inventory, setInventory, transactions, setTransactions, pessoas, setPessoas, addToast }) {
   const [orders, setOrders] = useState([])
@@ -451,9 +658,11 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
   const [bulkProduct, setBulkProduct] = useState('')   // produto para atribuição em lote
   const [bulkKey, setBulkKey] = useState(0)            // força reset do ProductSearch em lote
   const [dropOver, setDropOver] = useState(false)      // arrastar múltiplas etiquetas
+  const [autoScan, setAutoScan] = useState(false)      // modo leitura automática ativo
   const queueRef           = useRef([])                // fila de dataUrls aguardando
   const isProcessingRef    = useRef(false)             // flag: já há processamento ativo
   const processLabelImgRef = useRef(null)              // ref para sempre ter a versão atual
+  const finalizingRef      = useRef(new Set())         // ids sendo finalizados agora (trava duplo clique)
   const [queueInfo, setQueueInfo] = useState({ active: false, total: 0, done: 0 })
 
   // ── Abre câmera para ler etiqueta ───────────────────────────────────────────
@@ -502,9 +711,9 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
 
       setQueueInfo(prev => ({ ...prev, done: prev.done + 1 }))
 
-      // pausa entre etiquetas para a IA respirar e evitar rate limit
+      // pausa mínima entre etiquetas (retry automático cuida do rate limit)
       if (queueRef.current.length > 0) {
-        await new Promise(r => setTimeout(r, 2000))
+        await new Promise(r => setTimeout(r, 800))
       }
     }
 
@@ -538,6 +747,13 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     addToast(`📥 ${files.length} na fila — processando uma por vez`, 'info')
     startQueue()   // inicia o loop (ignora se já estiver rodando)
   }, [addToast, startQueue])
+
+  // ── Recebe frame capturado pelo AutoScanModal e injeta na fila ─────────────
+  const handleAutoCapture = useCallback((dataUrl) => {
+    queueRef.current.push(dataUrl)
+    setQueueInfo(prev => ({ active: true, total: prev.total + 1, done: prev.done }))
+    startQueue()
+  }, [startQueue])
 
   // ── Abre scanner QR para o produto de um pedido específico ─────────────────
   const openProductScan = (orderId) => {
@@ -635,13 +851,18 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
 
   // ── Finaliza um pedido ──────────────────────────────────────────────────────
   const finalizeOrder = useCallback(async (orderId) => {
+    // Trava imediata via ref — impede duplo clique mesmo antes do React re-renderizar
+    if (finalizingRef.current.has(orderId)) return
+    finalizingRef.current.add(orderId)
+
     const order = orders.find(o => o.id === orderId)
-    if (!order?.productData) return
+    if (!order?.productData) { finalizingRef.current.delete(orderId); return }
 
     const { labelData, productData, quantity = 1 } = order
 
     if (Number(productData.quantity) < quantity) {
       addToast('Estoque insuficiente!', 'error')
+      finalizingRef.current.delete(orderId)
       return
     }
 
@@ -696,6 +917,8 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     } catch (err) {
       setOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: 'ready' } : o))
       addToast(`Erro: ${err.message}`, 'error')
+    } finally {
+      finalizingRef.current.delete(orderId)
     }
   }, [orders, inventory, pessoas, setPessoas, setInventory, setTransactions, addToast])
 
@@ -748,6 +971,14 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
         <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap', alignItems: 'center' }}>
           <button className="btn btn-primary" onClick={openLabelScan} style={{ gap: '0.4rem' }}>
             Adicionar Etiqueta
+          </button>
+
+          <button
+            className="btn btn-sm"
+            onClick={() => setAutoScan(true)}
+            style={{ background: '#7c3aed', color: '#fff', border: 'none', fontWeight: 600, letterSpacing: '0.02em' }}
+          >
+            🚀 Modo Auto
           </button>
 
           {/* Zona de arrastar — sempre visível na toolbar */}
@@ -949,6 +1180,14 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
           subtitle="Aponte para o QR Code da embalagem - leitura automatica"
           onScan={(data) => handleQrScan(data, qrCamera.orderId)}
           onClose={() => setQrCamera(null)}
+        />
+      )}
+
+      {autoScan && (
+        <AutoScanModal
+          onCapture={handleAutoCapture}
+          onClose={() => setAutoScan(false)}
+          addToast={addToast}
         />
       )}
     </div>
