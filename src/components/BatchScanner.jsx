@@ -630,24 +630,3 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     </div>
   )
 }
-        />
-      )}
-    </div>
-  )
-}
-        />
-      )}
-
-      {/* Modal QR Code (produto) */}
-      {qrCamera && (
-        <QrScannerModal
-          key={qrKey}
-          title="🏷️ QR Code do Produto"
-          subtitle="Aponte para o QR Code da embalagem — leitura automática"
-          onScan={(data) => handleQrScan(data, qrCamera.orderId)}
-          onClose={() => setQrCamera(null)}
-        />
-      )}
-    </div>
-  )
-}
