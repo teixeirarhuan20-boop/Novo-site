@@ -585,13 +585,15 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
         id: generateId(), type: 'saída', itemId: item.id, itemName: packedName, city,
         quantity: Number(quantity), unitPrice: item.price,
         totalValue: item.price * Number(quantity),
-        personName: pessoa.name, date: formatDate(), status: 'pendente',
+        personName: pessoa.name, date: formatDate(),
       }
       const [{ error: e1 }, { error: e2 }] = await Promise.all([
         supabase.from('inventory').update({ quantity: newQty }).eq('id', item.id),
         supabase.from('transactions').insert([tx]),
       ])
       if (e1 || e2) throw new Error(`Erro ao salvar no banco. inventory: ${e1?.message || 'ok'} | transaction: ${e2?.message || 'ok'}`)
+      // Tenta salvar status separadamente (coluna pode não existir ainda)
+      supabase.from('transactions').update({ status: 'pendente' }).eq('id', tx.id).then(() => {})
       setInventory(prev => prev.map(i => i.id === item.id ? { ...i, quantity: newQty } : i))
       setTransactions(prev => [...prev, tx])
       addToast(`✅ Pedido de ${quantity}x "${item.name}" registrado!`, 'success')
