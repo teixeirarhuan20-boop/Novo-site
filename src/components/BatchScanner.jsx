@@ -1009,8 +1009,11 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       }
 
       // 5. Último fallback: Gemini Vision
-      const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
-      const visionData = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
+      let visionData = null
+      try {
+        const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
+        visionData = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
+      } catch {}
       if (visionData && (visionData.customerName || visionData.location)) {
         const enriched     = enrichWithGemini(merged, visionData)
         const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
@@ -1020,7 +1023,16 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
         return tempId
       }
 
-      throw new Error('Não foi possível identificar o destinatário.')
+      // Fallbacks falharam — mas se o parser local encontrou algo, mantém o card para revisão
+      const hasData = !!(merged.customerName || merged.recipientName || merged.trackingCode || merged.orderId || merged.cep)
+      if (hasData) {
+        const labelData = { ...merged, confidence, source, reviewRequired: true }
+        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
+        addToast('⚠️ Dados parciais — revise o card', 'warning')
+        return tempId
+      }
+
+      throw new Error('Nenhum dado identificado na etiqueta.')
     } catch (err) {
       setOrders(prev => prev.filter(o => o.id !== tempId))
       addToast(`Falha: ${err.message}`, 'error')
@@ -1244,7 +1256,16 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
             handleQuickReview(enriched, tempId)
           }
         } else {
-          throw new Error('Não foi possível identificar o destinatário. Tente outra foto.')
+          // Fallbacks visuais falharam — se o parser local tem algo, mantém para revisão
+          const hasData = !!(merged.customerName || merged.recipientName || merged.trackingCode || merged.orderId || merged.cep)
+          if (hasData) {
+            const labelData = { ...merged, confidence, source, reviewRequired: true }
+            setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
+            handleQuickReview(labelData, tempId)
+            addToast('⚠️ Dados parciais — revise os campos', 'warning')
+          } else {
+            throw new Error('Não foi possível identificar o destinatário. Tente outra foto.')
+          }
         }
       } catch (err) {
         setOrders(prev => prev.filter(o => o.id !== tempId))
