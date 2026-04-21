@@ -11,6 +11,54 @@ import { saveCorrection } from '../utils/labelMemory'
 import Tesseract from 'tesseract.js'
 import jsQR from 'jsqr'
 
+// ─── Helpers compartilhados por todos os pipelines de scanner ────────────────
+
+/**
+ * Monta o objeto de label mesclado (campos novos + legacy para OrderCard).
+ * qrParsed: dados do QR (parseQRData). parsed: dados do parser local.
+ */
+function buildMergedLabel(qrParsed = {}, parsed = {}) {
+  return {
+    recipientName:     parsed.recipientName     || null,
+    street:            parsed.street            || null,
+    addressNumber:     parsed.addressNumber     || null,
+    addressComplement: parsed.addressComplement || null,
+    neighborhood:      parsed.neighborhood      || null,
+    city:              parsed.city              || null,
+    state:             parsed.state             || null,
+    trackingCode:      qrParsed.trackingCode    || parsed.trackingCode || null,
+    orderId:           qrParsed.orderId         || parsed.orderId      || null,
+    cep:               qrParsed.cep             || parsed.cep          || null,
+    // Campos legacy (compatibilidade com OrderCard)
+    customerName:  parsed.recipientName || null,
+    location:      parsed.city          || null,
+    bairro:        parsed.neighborhood  || null,
+    address:       parsed.street        || null,
+    rastreio:      qrParsed.trackingCode || parsed.trackingCode || null,
+    modalidade:    null,
+    nf:            null,
+  }
+}
+
+/**
+ * Enriquece dados do parser local com resposta do Gemini/Vision.
+ */
+function enrichWithGemini(base = {}, gemini = {}) {
+  return {
+    ...base,
+    recipientName: gemini.customerName || base.recipientName,
+    customerName:  gemini.customerName || base.customerName,
+    city:          gemini.location     || base.city,
+    location:      gemini.location     || base.location,
+    bairro:        gemini.bairro        || base.bairro,
+    neighborhood:  gemini.bairro        || base.neighborhood,
+    address:       gemini.address       || base.address,
+    street:        gemini.address       || base.street,
+    modalidade:    gemini.modalidade    || base.modalidade || null,
+    nf:            gemini.nf            || base.nf         || null,
+  }
+}
+
 // ─── Modal de QR Code em tempo real ──────────────────────────────────────────
 function QrScannerModal({ title, subtitle, onScan, onClose }) {
   const [msg, setMsg] = useState('Iniciando câmera...')
@@ -328,8 +376,9 @@ function ProductSearch({ inventory, onSelect, placeholder = '🔍 Buscar produto
 }
 
 // ─── Card de cada pedido na fila ──────────────────────────────────────────────
-function OrderCard({ order, inventory, selected, onToggleSelect, onScanProduct, onSetQty, onSelectProduct, onFinalize, onRemove }) {
+function OrderCard({ order, inventory, selected, onToggleSelect, onScanProduct, onSetQty, onSelectProduct, onFinalize, onRemove, onReview }) {
   const { labelData, productData, status, quantity = 1 } = order
+  const needsReviewBadge = labelData?.reviewRequired && status !== 'done'
 
   const statusStyle = {
     loading:       { color: '#818cf8', label: '⏳ Analisando etiqueta...' },
@@ -362,6 +411,14 @@ function OrderCard({ order, inventory, selected, onToggleSelect, onScanProduct, 
           <span style={{ fontSize: '0.72rem', fontWeight: 700, color: selected ? '#6366f1' : statusStyle.color, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
             {statusStyle.label}
           </span>
+          {needsReviewBadge && (
+            <span style={{
+              fontSize: '0.62rem', fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+              background: 'rgba(245,158,11,0.18)', color: '#f59e0b', whiteSpace: 'nowrap',
+            }}>
+              ⚠️ Revisar
+            </span>
+          )}
         </div>
         {status !== 'done' && status !== 'processing' && (
           <button onClick={onRemove} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1rem', padding: 0, lineHeight: 1 }}>✕</button>
@@ -417,6 +474,15 @@ function OrderCard({ order, inventory, selected, onToggleSelect, onScanProduct, 
       {/* Botões de ação */}
       {status !== 'done' && status !== 'loading' && (
         <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.65rem', flexWrap: 'wrap' }}>
+          {needsReviewBadge && onReview && (
+            <button
+              className="btn btn-sm"
+              style={{ flex: 1, fontSize: '0.78rem', background: 'rgba(245,158,11,0.12)', color: '#f59e0b', border: '1px solid #f59e0b' }}
+              onClick={onReview}
+            >
+              📝 Revisar Dados
+            </button>
+          )}
           <button
             className="btn btn-secondary btn-sm"
             style={{ flex: 1, fontSize: '0.78rem' }}
@@ -906,23 +972,54 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
   // ── Abre câmera para ler etiqueta ───────────────────────────────────────────
   const openLabelScan = () => setCamera({ mode: 'label' })
 
-  // ── Processar uma imagem de etiqueta (shared entre câmera e drag) ───────────
+  // ── Processar uma imagem de etiqueta (shared entre câmera e drag & drop) ────
   const processLabelImage = useCallback(async (imageData) => {
     const tempId = generateId()
     setOrders(prev => [...prev, { id: tempId, status: 'loading', labelData: null, productData: null, quantity: 1 }])
     try {
-      const { data: { text } } = await Tesseract.recognize(imageData, 'por')
-      const data = await analyzeText(text, inventory, pessoas)
-      if (data && (data.customerName || data.location || data.orderId)) {
-        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: data, status: 'needs_product' } : o))
+      // 1. OCR local — uma única vez no frame
+      const { data: { text: rawOCR } } = await Tesseract.recognize(imageData, 'por')
+      const rawText = normalizeOCRText(rawOCR)
+
+      // 2. Parser local especializado (sem API)
+      const parsed     = parseBrazilianLabel(rawText)
+      const merged     = buildMergedLabel({}, parsed)
+      const source     = { qr: false, barcode: false, ocr: true, cepFallback: false }
+      const confidence = buildConfidence(merged, source)
+      const decision   = getDecision(confidence)
+
+      // 3. Confiança suficiente → adiciona direto com indicador de revisão se necessário
+      if (decision !== 'manual') {
+        const labelData = { ...merged, confidence, source, reviewRequired: decision === 'quick' }
+        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
         return tempId
       }
+
+      // 4. Confiança baixa → Gemini texto como fallback
+      let geminiData = null
+      try { geminiData = await analyzeText(rawOCR, inventory, pessoas) } catch {}
+
+      if (geminiData && (geminiData.customerName || geminiData.location || geminiData.orderId)) {
+        const enriched     = enrichWithGemini(merged, geminiData)
+        const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
+        enriched.confidence    = enrichedConf
+        enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
+        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: enriched, status: 'needs_product' } : o))
+        return tempId
+      }
+
+      // 5. Último fallback: Gemini Vision
       const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
       const visionData = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
       if (visionData && (visionData.customerName || visionData.location)) {
-        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: visionData, status: 'needs_product' } : o))
+        const enriched     = enrichWithGemini(merged, visionData)
+        const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
+        enriched.confidence    = enrichedConf
+        enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
+        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: enriched, status: 'needs_product' } : o))
         return tempId
       }
+
       throw new Error('Não foi possível identificar o destinatário.')
     } catch (err) {
       setOrders(prev => prev.filter(o => o.id !== tempId))
@@ -1009,26 +1106,31 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     addToast(`${tag} ${name} — confiança ${score}%`, 'success')
   }, [addToast])
 
-  // ── Recebe etiqueta de confiança média → abre QuickReviewModal ─────────────
-  const handleQuickReview = useCallback((labelData) => {
-    setQuickReview(labelData)
+  // ── Abre QuickReviewModal ──────────────────────────────────────────────────
+  // orderId: null = cria card novo (AutoScan) | string = atualiza card existente (câmera/drag)
+  const handleQuickReview = useCallback((labelData, orderId = null) => {
+    setQuickReview({ labelData, orderId })
   }, [])
 
-  // ── Confirma revisão rápida — salva correção + adiciona ao lote ────────────
+  // ── Confirma revisão rápida — persiste correção e atualiza/cria card ───────
   const confirmQuickReview = useCallback((correctedData) => {
-    // Persiste a correção para aprendizado futuro
-    if (quickReview) saveCorrection(quickReview, correctedData, 'quick')
+    if (quickReview?.labelData) saveCorrection(quickReview.labelData, correctedData, 'quick')
 
-    const id = generateId()
-    setOrders(prev => [...prev, {
-      id,
-      status: 'needs_product',
-      labelData: correctedData,
-      productData: null,
-      quantity: 1,
-    }])
     const name  = correctedData.recipientName || correctedData.customerName || 'Destinatário'
     const score = correctedData.confidence?.overall ?? 0
+    const final = { ...correctedData, reviewRequired: false }
+
+    if (quickReview?.orderId) {
+      // Atualiza card já existente (câmera / drag-drop)
+      setOrders(prev => prev.map(o =>
+        o.id === quickReview.orderId ? { ...o, labelData: final } : o
+      ))
+    } else {
+      // Cria novo card (AutoScan — card ainda não existe)
+      const id = generateId()
+      setOrders(prev => [...prev, { id, status: 'needs_product', labelData: final, productData: null, quantity: 1 }])
+    }
+
     addToast(`✅ ${name} — revisado (${score}%)`, 'success')
     setQuickReview(null)
   }, [quickReview, addToast])
@@ -1066,10 +1168,9 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     }
   }, [inventory, addToast])
 
-  // ── Callback quando foto de etiqueta é capturada ────────────────────────────
+  // ── Callback quando foto de etiqueta é capturada (câmera manual) ───────────
   const handleCapture = useCallback(async (imageData) => {
-    const mode = camera?.mode;
-    const targetOrderId = camera?.orderId;
+    const mode = camera?.mode
     setCamera(null)
 
     if (mode === 'label') {
@@ -1077,35 +1178,71 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       setOrders(prev => [...prev, { id: tempId, status: 'loading', labelData: null, productData: null, quantity: 1 }])
 
       try {
-        // 1) OCR local (Tesseract) — offline e gratuito
-        const { data: { text } } = await Tesseract.recognize(imageData, 'por')
-        const data = await analyzeText(text, inventory, pessoas)
+        // 1. OCR local — uma única vez
+        const { data: { text: rawOCR } } = await Tesseract.recognize(imageData, 'por')
+        const rawText = normalizeOCRText(rawOCR)
 
-        if (data && (data.customerName || data.location || data.orderId)) {
-          setOrders(prev => prev.map(o => o.id === tempId
-            ? { ...o, labelData: data, status: 'needs_product' }
-            : o
-          ))
-          addToast(`✅ Destinatário: ${data.customerName || 'Identificado'}`, 'success')
-          // 🔁 Abre scanner QR para identificar o produto automaticamente
-          setQrKey(k => k + 1)
-          setQrCamera({ orderId: tempId })
+        // 2. Parser local especializado (sem API)
+        const parsed     = parseBrazilianLabel(rawText)
+        const merged     = buildMergedLabel({}, parsed)
+        const source     = { qr: false, barcode: false, ocr: true, cepFallback: false }
+        const confidence = buildConfidence(merged, source)
+        const decision   = getDecision(confidence)
+
+        if (decision !== 'manual') {
+          const labelData = { ...merged, confidence, source, reviewRequired: decision === 'quick' }
+          setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
+
+          if (decision === 'auto') {
+            // Alta confiança: abre QR scanner de produto automaticamente
+            addToast(`✅ ${merged.recipientName || 'Destinatário'} — confiança ${confidence.overall}%`, 'success')
+            setQrKey(k => k + 1)
+            setQrCamera({ orderId: tempId })
+          } else {
+            // Média confiança: QuickReview automático (câmera é modo interativo)
+            handleQuickReview(labelData, tempId)
+          }
           return
         }
 
-        // 2) Fallback Vision AI — quando Tesseract não extrai dados suficientes
+        // 3. Confiança baixa → Gemini texto
+        addToast('Refinando com IA...', 'info')
+        let geminiData = null
+        try { geminiData = await analyzeText(rawOCR, inventory, pessoas) } catch {}
+
+        if (geminiData && (geminiData.customerName || geminiData.location || geminiData.orderId)) {
+          const enriched     = enrichWithGemini(merged, geminiData)
+          const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
+          enriched.confidence    = enrichedConf
+          enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
+          setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: enriched, status: 'needs_product' } : o))
+          addToast(`✅ ${enriched.recipientName || 'Identificado'}`, 'success')
+          if (!enriched.reviewRequired) {
+            setQrKey(k => k + 1)
+            setQrCamera({ orderId: tempId })
+          } else {
+            handleQuickReview(enriched, tempId)
+          }
+          return
+        }
+
+        // 4. Último fallback: Gemini Vision
         addToast('Refinando com IA visual...', 'info')
         const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
         const visionData = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
         if (visionData && (visionData.customerName || visionData.location)) {
-          setOrders(prev => prev.map(o => o.id === tempId
-            ? { ...o, labelData: visionData, status: 'needs_product' }
-            : o
-          ))
-          addToast(`✅ Lido pela IA: ${visionData.customerName || 'OK'}`, 'success')
-          // 🔁 Abre scanner QR para identificar o produto automaticamente
-          setQrKey(k => k + 1)
-          setQrCamera({ orderId: tempId })
+          const enriched     = enrichWithGemini(merged, visionData)
+          const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
+          enriched.confidence    = enrichedConf
+          enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
+          setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: enriched, status: 'needs_product' } : o))
+          addToast(`✅ Lido pela IA: ${enriched.recipientName || 'OK'}`, 'success')
+          if (!enriched.reviewRequired) {
+            setQrKey(k => k + 1)
+            setQrCamera({ orderId: tempId })
+          } else {
+            handleQuickReview(enriched, tempId)
+          }
         } else {
           throw new Error('Não foi possível identificar o destinatário. Tente outra foto.')
         }
@@ -1114,8 +1251,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
         addToast(`Falha na leitura: ${err.message}`, 'error')
       }
     }
-
-  }, [camera, inventory, pessoas, addToast, setOrders])
+  }, [camera, inventory, pessoas, addToast, handleQuickReview])
 
   // ── Seleciona produto manualmente ───────────────────────────────────────────
   const selectProduct = useCallback((orderId, productId) => {
@@ -1437,6 +1573,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
               onSelectProduct={productId => selectProduct(order.id, productId)}
               onFinalize={() => finalizeOrder(order.id)}
               onRemove={() => setOrders(prev => prev.filter(o => o.id !== order.id))}
+              onReview={() => handleQuickReview(order.labelData, order.id)}
             />
           ))}
         </div>
@@ -1475,7 +1612,7 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
 
       {quickReview && (
         <QuickReviewModal
-          labelData={quickReview}
+          labelData={quickReview.labelData}
           onConfirm={confirmQuickReview}
           onDiscard={() => setQuickReview(null)}
         />
