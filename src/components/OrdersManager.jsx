@@ -591,7 +591,7 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
         supabase.from('inventory').update({ quantity: newQty }).eq('id', item.id),
         supabase.from('transactions').insert([tx]),
       ])
-      if (e1 || e2) throw new Error('Erro ao salvar no banco.')
+      if (e1 || e2) throw new Error(`Erro ao salvar no banco. inventory: ${e1?.message || 'ok'} | transaction: ${e2?.message || 'ok'}`)
       setInventory(prev => prev.map(i => i.id === item.id ? { ...i, quantity: newQty } : i))
       setTransactions(prev => [...prev, tx])
       addToast(`✅ Pedido de ${quantity}x "${item.name}" registrado!`, 'success')
@@ -645,6 +645,36 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
       {/* ══ TAB: FORMULÁRIO ══════════════════════════════════════════════════════ */}
       {pageTab === 'form' && (
         <div className="card" style={{ maxWidth: 680 }}>
+
+          {/* ── Zona de Drag & Drop — topo do card ── */}
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={handleDrop}
+            style={{
+              border: `2px dashed ${dragOver ? '#2563eb' : dragProcessing ? '#7c3aed' : '#cbd5e1'}`,
+              borderRadius: 10,
+              padding: '0.9rem 1rem',
+              marginBottom: '0.75rem',
+              background: dragOver ? '#eff6ff' : dragProcessing ? '#faf5ff' : '#f8fafc',
+              display: 'flex', alignItems: 'center', gap: '0.75rem',
+              transition: 'all 0.18s',
+              cursor: 'default',
+            }}
+          >
+            <span style={{ fontSize: '1.8rem', lineHeight: 1, flexShrink: 0 }}>
+              {dragProcessing ? '⏳' : dragOver ? '📂' : '🖼️'}
+            </span>
+            <div>
+              <p style={{ margin: 0, fontSize: '0.85rem', fontWeight: 700, color: dragOver ? '#2563eb' : dragProcessing ? '#7c3aed' : '#374151' }}>
+                {dragProcessing ? 'Lendo imagem...' : dragOver ? 'Solte para preencher o formulário' : 'Arraste a foto da etiqueta aqui'}
+              </p>
+              <p style={{ margin: 0, fontSize: '0.73rem', color: '#94a3b8', marginTop: 2 }}>
+                Preenche cliente, CEP, endereço e rastreio automaticamente
+              </p>
+            </div>
+          </div>
+
           <button
             type="button" className="btn btn-secondary"
             style={{ width: '100%', marginBottom: showLabel ? '0.75rem' : 0, justifyContent: 'center', gap: '0.5rem' }}
@@ -658,35 +688,6 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
               <hr className="divider" />
             </>
           )}
-
-          {/* ── Zona de Drag & Drop ── */}
-          <div
-            onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={handleDrop}
-            style={{
-              border: `2px dashed ${dragOver ? '#2563eb' : '#cbd5e1'}`,
-              borderRadius: 10,
-              padding: '0.85rem 1rem',
-              marginBottom: '0.5rem',
-              background: dragOver ? '#eff6ff' : dragProcessing ? '#f8fafc' : 'transparent',
-              display: 'flex', alignItems: 'center', gap: '0.75rem',
-              transition: 'all 0.18s',
-              cursor: 'default',
-            }}
-          >
-            <span style={{ fontSize: '1.6rem', lineHeight: 1 }}>
-              {dragProcessing ? '⏳' : dragOver ? '📂' : '🖼️'}
-            </span>
-            <div>
-              <p style={{ margin: 0, fontSize: '0.82rem', fontWeight: 600, color: dragOver ? '#2563eb' : '#475569' }}>
-                {dragProcessing ? 'Extraindo dados...' : dragOver ? 'Solte para extrair dados' : 'Arraste uma foto da etiqueta aqui'}
-              </p>
-              <p style={{ margin: 0, fontSize: '0.73rem', color: '#94a3b8' }}>
-                Os campos do formulário serão preenchidos automaticamente
-              </p>
-            </div>
-          </div>
 
           <form onSubmit={handleOrder} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
             <div className="form-group">
@@ -1072,7 +1073,6 @@ function selStyle(active) {
 
 function batchBtnStyle(bg, color, border) {
   return {
-    padding: '4px 11px', borderRadius: 8,
     border: `1px solid ${border}`, background: bg, color,
     fontSize: '0.76rem', fontWeight: 700, cursor: 'pointer',
   }
