@@ -3,7 +3,8 @@ import { analyzeText, analyzeDocument } from '../lib/gemini'
 import { supabase } from '../lib/supabase'
 import { generateId, formatDate, formatCurrency } from '../utils/formatting'
 import { geocode, packLocation } from '../utils/location'
-import { hasLabelHeuristic, playBeep, preprocessCanvas } from '../utils/labelDetect'
+import { hasLabelHeuristic, playBeep, preprocessCanvas, scoreLabel, mergeData } from '../utils/labelDetect'
+import { parseQRData, qrDedupKey } from '../utils/qrParser'
 import Tesseract from 'tesseract.js'
 import jsQR from 'jsqr'
 
@@ -443,7 +444,7 @@ function OrderCard({ order, inventory, selected, onToggleSelect, onScanProduct, 
 }
 
 // ─── Modal de leitura automática contínua ────────────────────────────────────
-function AutoScanModal({ onCapture, onClose, addToast }) {
+function AutoScanModal({ onCapture, onAddOrder, onClose, addToast, inventory, pessoas }) {
   const videoRef      = useRef(null)
   const canvasRef     = useRef(null)
   const streamRef     = useRef(null)
@@ -452,7 +453,7 @@ function AutoScanModal({ onCapture, onClose, addToast }) {
   const seenQRsRef    = useRef(new Set())   // anti-dupe de QR codes
   const heurSinceRef  = useRef(0)           // timestamp da primeira detecção contínua
 
-  const [status, setStatus] = useState('aguardando') // aguardando | detectando | capturado
+  const [status, setStatus] = useState('aguardando') // aguardando | detectando | processando | capturado
   const [flash,  setFlash]  = useState(false)
   const [count,  setCount]  = useState(0)
 
@@ -501,12 +502,12 @@ function AutoScanModal({ onCapture, onClose, addToast }) {
     const qr = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'dontInvert' })
 
     if (qr?.data) {
-      const key = qr.data.trim().slice(0, 60)
+      const key = qrDedupKey(qr.data)
       if (seenQRsRef.current.has(key)) return
       seenQRsRef.current.add(key)
       setTimeout(() => seenQRsRef.current.delete(key), 8000)
       heurSinceRef.current = 0
-      doCapture(canvas)
+      doCapture(canvas, qr.data)  // passa o QR string como gatilho
       return
     }
 
@@ -526,17 +527,72 @@ function AutoScanModal({ onCapture, onClose, addToast }) {
     }
   }
 
-  function doCapture(canvas) {
+  async function doCapture(canvas, qrCode = null) {
     blockedRef.current = true
-    const dataUrl = preprocessCanvas(canvas)
 
-    // Flash branco + beep
+    // Flash visual imediato
     setFlash(true)
     setTimeout(() => setFlash(false), 280)
-    playBeep('success')
 
-    // Envia para a fila do BatchScanner
-    onCapture(dataUrl)
+    const dataUrl = preprocessCanvas(canvas)
+
+    if (qrCode) {
+      // ── Caminho QR: pipeline completo ────────────────────────────────────
+      setStatus('processando')
+      playBeep('pending')
+
+      try {
+        // 1. Parse rápido do QR
+        const qrParsed = parseQRData(qrCode)
+
+        // 2. OCR local no frame congelado
+        const { data: { text: rawText } } = await Tesseract.recognize(dataUrl, 'por')
+
+        // 3. Análise Gemini do texto (com retry automático já embutido)
+        let ocrData = null
+        try {
+          ocrData = await analyzeText(rawText, inventory || [], pessoas || [])
+        } catch { /* Gemini falhou — usa só o QR */ }
+
+        // 4. Mescla QR (preciso) + OCR (rico em contexto)
+        const merged = mergeData(qrParsed, ocrData || {})
+
+        // 5. Score de confiança
+        const score = scoreLabel(merged)
+
+        // 6. Monta objeto final estruturado
+        const labelData = {
+          ...merged,
+          qrCode,
+          rawText: rawText?.slice(0, 400) || '',
+          confidence: {
+            score,
+            high:   score >= 65,
+            medium: score >= 35 && score < 65,
+          },
+          source: { qr: true, ocr: !!ocrData },
+        }
+
+        playBeep('success')
+
+        if (score >= 35 || merged.trackingCode || merged.orderId) {
+          // Confiança suficiente → adiciona direto ao lote
+          onAddOrder(labelData)
+        } else {
+          // Confiança baixa mas tem imagem → fila normal com OCR completo
+          onCapture(dataUrl)
+        }
+      } catch {
+        // Qualquer erro → fallback para fila normal
+        onCapture(dataUrl)
+        playBeep('error')
+      }
+    } else {
+      // ── Caminho heurístico (sem QR): fila normal ──────────────────────────
+      playBeep('success')
+      onCapture(dataUrl)
+    }
+
     setCount(c => c + 1)
     setStatus('capturado')
 
@@ -547,7 +603,10 @@ function AutoScanModal({ onCapture, onClose, addToast }) {
     }, 3000)
   }
 
-  const borderColor = status === 'capturado' ? '#10b981' : status === 'detectando' ? '#f59e0b' : '#6366f1'
+  const borderColor = status === 'capturado'   ? '#10b981'
+    : status === 'processando' ? '#818cf8'
+    : status === 'detectando'  ? '#f59e0b'
+    : '#6366f1'
 
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 4000, background: '#000', display: 'flex', flexDirection: 'column' }}>
@@ -636,6 +695,11 @@ function AutoScanModal({ onCapture, onClose, addToast }) {
         {status === 'detectando' && (
           <p style={{ color: '#f59e0b', fontSize: '0.95rem', fontWeight: 600, margin: 0 }}>
             🔍 Etiqueta detectada — segure firme...
+          </p>
+        )}
+        {status === 'processando' && (
+          <p style={{ color: '#818cf8', fontSize: '0.95rem', fontWeight: 600, margin: 0 }}>
+            ⏳ QR lido — extraindo dados da etiqueta...
           </p>
         )}
         {status === 'capturado' && (
@@ -748,12 +812,28 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     startQueue()   // inicia o loop (ignora se já estiver rodando)
   }, [addToast, startQueue])
 
-  // ── Recebe frame capturado pelo AutoScanModal e injeta na fila ─────────────
+  // ── Recebe frame capturado pelo AutoScanModal e injeta na fila (fallback) ──
   const handleAutoCapture = useCallback((dataUrl) => {
     queueRef.current.push(dataUrl)
     setQueueInfo(prev => ({ active: true, total: prev.total + 1, done: prev.done }))
     startQueue()
   }, [startQueue])
+
+  // ── Recebe labelData já processado pelo AutoScanModal (caminho QR) ─────────
+  const handleAutoAddOrder = useCallback((labelData) => {
+    const id = generateId()
+    setOrders(prev => [...prev, {
+      id,
+      status: 'needs_product',
+      labelData,
+      productData: null,
+      quantity: 1,
+    }])
+    const name  = labelData.customerName || labelData.recipientName || 'Destinatário'
+    const score = labelData.confidence?.score ?? 0
+    const tag   = score >= 65 ? '🟢' : '🟡'
+    addToast(`${tag} ${name} — confiança ${score}%`, 'success')
+  }, [addToast])
 
   // ── Abre scanner QR para o produto de um pedido específico ─────────────────
   const openProductScan = (orderId) => {
@@ -1186,8 +1266,11 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       {autoScan && (
         <AutoScanModal
           onCapture={handleAutoCapture}
+          onAddOrder={handleAutoAddOrder}
           onClose={() => setAutoScan(false)}
           addToast={addToast}
+          inventory={inventory}
+          pessoas={pessoas}
         />
       )}
     </div>

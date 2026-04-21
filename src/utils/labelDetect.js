@@ -98,3 +98,57 @@ export function preprocessCanvas(srcCanvas, maxW = 960) {
   ctx.putImageData(imgData, 0, 0)
   return out.toDataURL('image/jpeg', 0.88)
 }
+
+/**
+ * Pontua os dados extraídos de 0 a 100.
+ * >= 65 → alta confiança (auto-add sem revisão)
+ * >= 35 → média (adiciona com aviso)
+ *  < 35 → baixa (fallback para fila normal)
+ */
+export function scoreLabel(data) {
+  if (!data) return 0
+  let s = 0
+  if (data.customerName && data.customerName.length > 3)     s += 30
+  if ((data.rastreio || data.trackingCode)?.length > 8)      s += 25
+  if (data.cep && /\d{5}-?\d{3}/.test(data.cep))            s += 20
+  if ((data.orderId || '').length > 4)                       s += 15
+  if ((data.location || data.city || '').length > 2)         s += 10
+  if (data.bairro || data.neighborhood)                      s += 5
+  if (data.address || data.street)                           s += 5
+  return Math.min(s, 100)
+}
+
+/**
+ * Mescla dados do QR (alta precisão) com dados do OCR.
+ * QR  → prioridade em: trackingCode, orderId, cep
+ * OCR → prioridade em: customerName, location, bairro, address
+ *
+ * Retorna objeto no formato compatível com OrderCard (campos legacy)
+ * + campos novos da estrutura esperada.
+ */
+export function mergeData(qrParsed = {}, ocrData = {}) {
+  const tracking = qrParsed.trackingCode || ocrData?.rastreio || null
+  const cep      = qrParsed.cep          || ocrData?.cep      || null
+  const orderId  = qrParsed.orderId      || ocrData?.orderId  || null
+
+  return {
+    // ── Campos legacy (compatíveis com OrderCard) ──────────────────────────
+    customerName: ocrData?.customerName || null,
+    location:     ocrData?.location     || null,
+    cep,
+    address:      ocrData?.address      || null,
+    bairro:       ocrData?.bairro       || null,
+    orderId,
+    rastreio:     tracking,
+    modalidade:   ocrData?.modalidade   || null,
+    nf:           ocrData?.nf           || null,
+
+    // ── Campos novos (estrutura enriquecida) ───────────────────────────────
+    recipientName: ocrData?.customerName || null,
+    street:        ocrData?.address      || null,
+    city:          ocrData?.location     || null,
+    state:         null,                           // não extraído ainda
+    neighborhood:  ocrData?.bairro       || null,
+    trackingCode:  tracking,
+  }
+}
