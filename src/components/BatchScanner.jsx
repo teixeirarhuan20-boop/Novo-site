@@ -502,9 +502,9 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
 
       setQueueInfo(prev => ({ ...prev, done: prev.done + 1 }))
 
-      // pausa entre etiquetas para a IA respirar
+      // pausa entre etiquetas para a IA respirar e evitar rate limit
       if (queueRef.current.length > 0) {
-        await new Promise(r => setTimeout(r, 500))
+        await new Promise(r => setTimeout(r, 2000))
       }
     }
 

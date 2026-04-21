@@ -126,58 +126,78 @@ async function callGeminiText(prompt) {
   if (!geminiKey) throw new Error('Chave Gemini não configurada.')
   const models = ['gemini-2.0-flash', 'gemini-2.0-flash-lite']
 
-  for (const model of models) {
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.1, topP: 0.1, response_mime_type: 'application/json' },
-          }),
-        }
-      )
-      const data = await res.json()
-      if (data.error?.code === 429) throw new Error('RATE_LIMIT')
-      if (data.error) throw new Error(data.error.message)
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-      if (text) return text
-    } catch (e) {
-      if (e.message === 'RATE_LIMIT') throw new Error('⏳ Limite de leituras atingido! Aguarde 1 minuto.')
+  // Tenta todos os modelos — se todos derem 429, espera e repete (até 3 rodadas)
+  for (let round = 0; round < 3; round++) {
+    for (const model of models) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: { temperature: 0.1, topP: 0.1, response_mime_type: 'application/json' },
+            }),
+          }
+        )
+        const data = await res.json()
+        if (data.error?.code === 429) throw new Error('RATE_LIMIT')
+        if (data.error) throw new Error(data.error.message)
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text
+        if (text) return text
+      } catch (e) {
+        if (e.message !== 'RATE_LIMIT') throw e
+        // rate limit neste modelo — tenta o próximo
+      }
+    }
+    // Todos os modelos deram 429 nesta rodada — espera antes de tentar de novo
+    if (round < 2) {
+      const waitSec = (round + 1) * 7 // 7s, 14s
+      console.warn(`[Gemini Text] Rate limit em todos os modelos — aguardando ${waitSec}s (rodada ${round + 1}/3)`)
+      await new Promise(r => setTimeout(r, waitSec * 1000))
     }
   }
-  throw new Error('Todos os modelos Gemini falharam.')
+  throw new Error('⏳ Limite atingido após 3 tentativas. Tente novamente em alguns minutos.')
 }
 
 async function callGeminiVision(prompt, base64Image, mimeType) {
   if (!geminiKey) throw new Error('Chave Gemini não configurada.')
   const models = ['gemini-2.0-flash', 'gemini-2.0-flash-lite']
 
-  for (const model of models) {
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType, data: base64Image } }] }],
-            generationConfig: { temperature: 0.1 },
-          }),
-        }
-      )
-      const data = await res.json()
-      if (data.error?.code === 429) throw new Error('RATE_LIMIT')
-      if (data.error) throw new Error(data.error.message)
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-      if (text) return text
-    } catch (e) {
-      if (e.message === 'RATE_LIMIT') throw new Error('⏳ Limite atingido! Aguarde 1 minuto.')
+  // Tenta todos os modelos — se todos derem 429, espera e repete (até 3 rodadas)
+  for (let round = 0; round < 3; round++) {
+    for (const model of models) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType, data: base64Image } }] }],
+              generationConfig: { temperature: 0.1 },
+            }),
+          }
+        )
+        const data = await res.json()
+        if (data.error?.code === 429) throw new Error('RATE_LIMIT')
+        if (data.error) throw new Error(data.error.message)
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text
+        if (text) return text
+      } catch (e) {
+        if (e.message !== 'RATE_LIMIT') throw e
+        // rate limit neste modelo — tenta o próximo
+      }
+    }
+    // Todos os modelos deram 429 nesta rodada — espera antes de tentar de novo
+    if (round < 2) {
+      const waitSec = (round + 1) * 7 // 7s, 14s
+      console.warn(`[Gemini Vision] Rate limit em todos os modelos — aguardando ${waitSec}s (rodada ${round + 1}/3)`)
+      await new Promise(r => setTimeout(r, waitSec * 1000))
     }
   }
-  throw new Error('Visão Gemini falhou.')
+  throw new Error('⏳ Limite atingido após 3 tentativas. Tente novamente em alguns minutos.')
 }
 
 // ─── Exports públicos ────────────────────────────────────────────────────────
