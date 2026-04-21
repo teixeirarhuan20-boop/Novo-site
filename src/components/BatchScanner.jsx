@@ -243,8 +243,87 @@ function CameraModal({ title, subtitle, onCapture, onClose }) {
   )
 }
 
+// ─── Busca de produto com digitação ──────────────────────────────────────────
+function ProductSearch({ inventory, onSelect, placeholder = '🔍 Buscar produto...' }) {
+  const [query, setQuery]   = useState('')
+  const [open, setOpen]     = useState(false)
+  const wrapRef             = useRef(null)
+
+  const filtered = query.trim().length === 0
+    ? inventory.filter(i => i.quantity > 0).slice(0, 8)
+    : inventory.filter(i =>
+        i.quantity > 0 &&
+        i.name.toLowerCase().includes(query.toLowerCase())
+      ).slice(0, 10)
+
+  // fecha ao clicar fora
+  useEffect(() => {
+    const handler = e => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', flex: 1, minWidth: 180 }}>
+      <input
+        type="text"
+        value={query}
+        placeholder={placeholder}
+        autoComplete="off"
+        onChange={e => { setQuery(e.target.value); setOpen(true) }}
+        onFocus={() => setOpen(true)}
+        style={{
+          width: '100%', boxSizing: 'border-box',
+          fontSize: '0.8rem', padding: '5px 9px',
+          borderRadius: 7, border: '1px solid #475569',
+          background: '#334155', color: '#f1f5f9',
+          outline: 'none',
+        }}
+      />
+      {open && filtered.length > 0 && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 200,
+          background: '#334155',
+          border: '1px solid #475569',
+          borderRadius: 8, marginTop: 2,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+          maxHeight: 220, overflowY: 'auto',
+        }}>
+          {filtered.map(i => (
+            <div
+              key={i.id}
+              onMouseDown={() => { onSelect(i.id); setQuery(i.name); setOpen(false) }}
+              style={{
+                padding: '7px 12px', fontSize: '0.8rem', cursor: 'pointer',
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                borderBottom: '1px solid #475569',
+                color: '#f1f5f9',
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = 'rgba(99,102,241,0.25)'}
+              onMouseLeave={e => e.currentTarget.style.background = ''}
+            >
+              <span>{i.name}</span>
+              <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>{i.quantity} un.</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {open && query.trim().length > 0 && filtered.length === 0 && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 200,
+          background: '#334155', border: '1px solid #475569',
+          borderRadius: 8, marginTop: 2, padding: '8px 12px',
+          fontSize: '0.78rem', color: '#94a3b8',
+        }}>
+          Nenhum produto encontrado
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Card de cada pedido na fila ──────────────────────────────────────────────
-function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct, onFinalize, onRemove }) {
+function OrderCard({ order, inventory, selected, onToggleSelect, onScanProduct, onSetQty, onSelectProduct, onFinalize, onRemove }) {
   const { labelData, productData, status, quantity = 1 } = order
 
   const statusStyle = {
@@ -257,16 +336,28 @@ function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct,
 
   return (
     <div className="card" style={{
-      borderLeft: `4px solid ${statusStyle.color}`,
+      borderLeft: `4px solid ${selected ? '#6366f1' : statusStyle.color}`,
       padding: '0.9rem 1rem',
       opacity: status === 'done' ? 0.6 : 1,
-      transition: 'opacity 0.3s',
+      transition: 'all 0.2s',
+      outline: selected ? '2px solid #6366f1' : 'none',
+      outlineOffset: 2,
     }}>
       {/* Status row */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
-        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: statusStyle.color, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-          {statusStyle.label}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          {/* Checkbox de seleção */}
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={onToggleSelect}
+            style={{ width: 15, height: 15, cursor: 'pointer', accentColor: '#6366f1', flexShrink: 0 }}
+            title="Selecionar para atribuição em lote"
+          />
+          <span style={{ fontSize: '0.72rem', fontWeight: 700, color: selected ? '#6366f1' : statusStyle.color, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            {statusStyle.label}
+          </span>
+        </div>
         {status !== 'done' && status !== 'processing' && (
           <button onClick={onRemove} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1rem', padding: 0, lineHeight: 1 }}>✕</button>
         )}
@@ -312,17 +403,8 @@ function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct,
           </div>
         ) : status !== 'loading' ? (
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Produto:</span>
-            <select
-              defaultValue=""
-              onChange={e => onSelectProduct(e.target.value)}
-              style={{ fontSize: '0.78rem', padding: '3px 6px', flex: 1, minWidth: 150 }}
-            >
-              <option value="" disabled>Selecionar manualmente...</option>
-              {inventory.filter(i => i.quantity > 0).map(i => (
-                <option key={i.id} value={i.id}>{i.name} ({i.quantity} un.)</option>
-              ))}
-            </select>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Produto:</span>
+            <ProductSearch inventory={inventory} onSelect={onSelectProduct} />
           </div>
         ) : null}
       </div>
@@ -362,12 +444,100 @@ function OrderCard({ order, inventory, onScanProduct, onSetQty, onSelectProduct,
 // ─── Componente principal ─────────────────────────────────────────────────────
 export function BatchScanner({ inventory, setInventory, transactions, setTransactions, pessoas, setPessoas, addToast }) {
   const [orders, setOrders] = useState([])
-  const [camera, setCamera] = useState(null) // null | { mode: 'label' | 'product', orderId? }
-  const [qrCamera, setQrCamera] = useState(null) // null | { orderId }
-  const [qrKey, setQrKey] = useState(0) // força remount do QrScannerModal a cada abertura
+  const [camera, setCamera] = useState(null)
+  const [qrCamera, setQrCamera] = useState(null)
+  const [qrKey, setQrKey] = useState(0)
+  const [selected, setSelected] = useState(new Set()) // ids selecionados
+  const [bulkProduct, setBulkProduct] = useState('')   // produto para atribuição em lote
+  const [bulkKey, setBulkKey] = useState(0)            // força reset do ProductSearch em lote
+  const [dropOver, setDropOver] = useState(false)      // arrastar múltiplas etiquetas
+  const queueRef           = useRef([])                // fila de dataUrls aguardando
+  const isProcessingRef    = useRef(false)             // flag: já há processamento ativo
+  const processLabelImgRef = useRef(null)              // ref para sempre ter a versão atual
+  const [queueInfo, setQueueInfo] = useState({ active: false, total: 0, done: 0 })
 
   // ── Abre câmera para ler etiqueta ───────────────────────────────────────────
   const openLabelScan = () => setCamera({ mode: 'label' })
+
+  // ── Processar uma imagem de etiqueta (shared entre câmera e drag) ───────────
+  const processLabelImage = useCallback(async (imageData) => {
+    const tempId = generateId()
+    setOrders(prev => [...prev, { id: tempId, status: 'loading', labelData: null, productData: null, quantity: 1 }])
+    try {
+      const { data: { text } } = await Tesseract.recognize(imageData, 'por')
+      const data = await analyzeText(text, inventory, pessoas)
+      if (data && (data.customerName || data.location || data.orderId)) {
+        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: data, status: 'needs_product' } : o))
+        return tempId
+      }
+      const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
+      const visionData = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
+      if (visionData && (visionData.customerName || visionData.location)) {
+        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: visionData, status: 'needs_product' } : o))
+        return tempId
+      }
+      throw new Error('Não foi possível identificar o destinatário.')
+    } catch (err) {
+      setOrders(prev => prev.filter(o => o.id !== tempId))
+      addToast(`Falha: ${err.message}`, 'error')
+      return null
+    }
+  }, [inventory, pessoas, addToast])
+
+  // Mantém a ref sempre apontando para a versão atual de processLabelImage
+  processLabelImgRef.current = processLabelImage
+
+  // ── Fila sequencial com while loop — sem stale closure ─────────────────────
+  // Definida como ref para poder ser chamada de qualquer lugar sem deps
+  const startQueue = useRef(async () => {
+    if (isProcessingRef.current) return   // já rodando, a fila vai ser consumida pelo loop
+    isProcessingRef.current = true
+
+    while (queueRef.current.length > 0) {
+      const dataUrl = queueRef.current.shift()
+      setQueueInfo(prev => ({ ...prev, active: true }))
+
+      const id = await processLabelImgRef.current(dataUrl)
+      if (id) setSelected(prev => new Set([...prev, id]))
+
+      setQueueInfo(prev => ({ ...prev, done: prev.done + 1 }))
+
+      // pausa entre etiquetas para a IA respirar
+      if (queueRef.current.length > 0) {
+        await new Promise(r => setTimeout(r, 500))
+      }
+    }
+
+    isProcessingRef.current = false
+    setQueueInfo({ active: false, total: 0, done: 0 })
+  }).current
+
+  // ── Drag & drop: adiciona à fila e dispara o processador ───────────────────
+  const handleMultiDrop = useCallback(async (e) => {
+    e.preventDefault()
+    setDropOver(false)
+    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'))
+    if (!files.length) { addToast('Arraste imagens de etiquetas.', 'warning'); return }
+
+    for (const file of files) {
+      const dataUrl = await new Promise((res, rej) => {
+        const reader = new FileReader()
+        reader.onload = ev => res(ev.target.result)
+        reader.onerror = rej
+        reader.readAsDataURL(file)
+      })
+      queueRef.current.push(dataUrl)
+    }
+
+    setQueueInfo(prev => ({
+      active: true,
+      total: prev.total + files.length,
+      done: prev.done,
+    }))
+
+    addToast(`📥 ${files.length} na fila — processando uma por vez`, 'info')
+    startQueue()   // inicia o loop (ignora se já estiver rodando)
+  }, [addToast, startQueue])
 
   // ── Abre scanner QR para o produto de um pedido específico ─────────────────
   const openProductScan = (orderId) => {
@@ -529,6 +699,32 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     }
   }, [orders, inventory, pessoas, setPessoas, setInventory, setTransactions, addToast])
 
+  // ── Atribui produto em lote para os selecionados ───────────────────────────
+  const applyBulkProduct = useCallback(() => {
+    if (!bulkProduct) { addToast('Selecione um produto primeiro.', 'warning'); return }
+    const product = inventory.find(p => p.id === bulkProduct)
+    if (!product) return
+    setOrders(prev => prev.map(o =>
+      selected.has(o.id) && o.status !== 'done' && o.status !== 'processing'
+        ? { ...o, productData: product, status: 'ready' }
+        : o
+    ))
+    addToast(`🏷️ "${product.name}" aplicado a ${selected.size} pedido(s)!`, 'success')
+    setSelected(new Set())
+    setBulkProduct('')
+    setBulkKey(k => k + 1)
+  }, [bulkProduct, inventory, selected, addToast])
+
+  // ── Toggle seleção de um pedido ─────────────────────────────────────────────
+  const toggleSelect = useCallback((orderId) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(orderId)) next.delete(orderId)
+      else next.add(orderId)
+      return next
+    })
+  }, [])
+
   // ── Finaliza todos os prontos ───────────────────────────────────────────────
   const finalizeAll = useCallback(async () => {
     const ready = orders.filter(o => o.status === 'ready')
@@ -537,14 +733,54 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
 
   const readyCount = orders.filter(o => o.status === 'ready').length
   const doneCount  = orders.filter(o => o.status === 'done').length
+  const activeOrders = orders.filter(o => o.status !== 'done')
 
   return (
     <div>
-      {/* Toolbar */}
-      <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
-        <button className="btn btn-primary" onClick={openLabelScan} style={{ gap: '0.4rem' }}>
-          📷 Adicionar Etiqueta
-        </button>
+      {/* Toolbar — sticky para ficar visível ao rolar a fila */}
+      <div style={{
+        position: 'sticky', top: 0, zIndex: 10,
+        background: 'var(--bg, #0f172a)',
+        paddingBottom: '0.5rem',
+        paddingTop: '0.25rem',
+        marginBottom: '0.5rem',
+      }}>
+        <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap', alignItems: 'center' }}>
+          <button className="btn btn-primary" onClick={openLabelScan} style={{ gap: '0.4rem' }}>
+            Adicionar Etiqueta
+          </button>
+
+          {/* Zona de arrastar — sempre visível na toolbar */}
+          <div
+            onDragOver={e => { e.preventDefault(); setDropOver(true) }}
+            onDragLeave={() => setDropOver(false)}
+            onDrop={handleMultiDrop}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
+              padding: '0.55rem 1.4rem',
+              borderRadius: 10,
+              border: dropOver
+                ? '2px dashed #6366f1'
+                : queueInfo.active
+                ? '2px dashed #f59e0b'
+                : '2px dashed var(--border)',
+              background: dropOver
+                ? 'rgba(99,102,241,0.10)'
+                : queueInfo.active
+                ? 'rgba(245,158,11,0.08)'
+                : 'rgba(255,255,255,0.02)',
+              fontSize: '0.82rem', fontWeight: 500,
+              color: dropOver ? '#6366f1' : queueInfo.active ? '#f59e0b' : 'var(--text-muted)',
+              cursor: 'default', transition: 'all 0.15s',
+              userSelect: 'none', minWidth: 220,
+            }}
+          >
+            {queueInfo.active
+              ? `⏳ ${queueInfo.done + 1} de ${queueInfo.total}... (solte mais)`
+              : dropOver
+              ? '📂 Solte para adicionar à fila'
+              : '➕ Arraste etiquetas aqui'}
+          </div>
 
         {readyCount > 1 && (
           <button
@@ -552,77 +788,165 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
             style={{ background: 'var(--success)', color: '#fff', border: 'none' }}
             onClick={finalizeAll}
           >
-            ✅ Finalizar Todos ({readyCount})
+            Finalizar Todos ({readyCount})
           </button>
         )}
 
         {orders.length > 0 && (
-          <button className="btn btn-secondary btn-sm" onClick={() => setOrders([])}>
-            🗑️ Limpar fila
+          <button className="btn btn-secondary btn-sm" onClick={() => { setOrders([]); setSelected(new Set()) }}>
+            Limpar fila
           </button>
         )}
 
         {orders.length > 0 && (
           <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginLeft: 'auto' }}>
-            {orders.length} etiqueta(s) · {readyCount} pronta(s) · {doneCount} finalizada(s)
+            {orders.length} etiqueta(s) &middot; {readyCount} pronta(s) &middot; {doneCount} finalizada(s)
           </span>
         )}
-      </div>
+        </div> {/* fim flex row */}
+      </div> {/* fim sticky toolbar */}
 
-      {/* Empty state */}
-      {orders.length === 0 && (
-        <div className="card" style={{
-          textAlign: 'center', padding: '3rem 2rem', color: 'var(--text-muted)',
-          border: '2px dashed var(--border)',
+      {selected.size > 0 && (
+        <div style={{
+          background: 'rgba(99,102,241,0.08)',
+          border: '1.5px solid #6366f1',
+          borderRadius: 12,
+          padding: '0.75rem 1rem',
+          marginBottom: '0.75rem',
+          display: 'flex', flexWrap: 'wrap', gap: '0.6rem', alignItems: 'center',
         }}>
-          <div style={{ fontSize: '3rem', marginBottom: '0.75rem' }}>📷</div>
-          <p style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '0.4rem' }}>Nenhuma etiqueta na fila</p>
-          <p style={{ fontSize: '0.82rem', marginBottom: '1.25rem', lineHeight: 1.6 }}>
-            Clique em <b>"Adicionar Etiqueta"</b> e use a câmera ou selecione uma foto da galeria.<br/>
-            O sistema identifica Cliente, CEP e Cidade automaticamente.
-          </p>
-          <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-            <span>📦 Shopee</span><span>·</span>
-            <span>📮 Correios</span><span>·</span>
-            <span>🚚 Jadlog</span><span>·</span>
-            <span>📋 Mercado Livre</span>
+          <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#6366f1' }}>
+            {selected.size} selecionado(s)
+          </span>
+
+          <button
+            className="btn btn-secondary btn-sm"
+            style={{ fontSize: '0.76rem' }}
+            onClick={() => {
+              if (selected.size === activeOrders.length) setSelected(new Set())
+              else setSelected(new Set(activeOrders.map(o => o.id)))
+            }}
+          >
+            {selected.size === activeOrders.length ? 'Desmarcar todos' : 'Selecionar todos'}
+          </button>
+
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flex: 1, minWidth: 240 }}>
+            <ProductSearch
+              key={bulkKey}
+              inventory={inventory}
+              onSelect={id => setBulkProduct(id)}
+              placeholder="🔍 Escolher produto para todos..."
+            />
+            <button
+              className="btn btn-sm"
+              style={{ background: '#6366f1', color: '#fff', border: 'none', whiteSpace: 'nowrap', fontSize: '0.78rem' }}
+              onClick={applyBulkProduct}
+              disabled={!bulkProduct}
+            >
+              Aplicar
+            </button>
           </div>
+
+          <button
+            className="btn btn-secondary btn-sm"
+            style={{ fontSize: '0.76rem', marginLeft: 'auto' }}
+            onClick={() => setSelected(new Set())}
+          >
+            Cancelar
+          </button>
         </div>
       )}
 
-      {/* Lista de pedidos */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-        {orders.map(order => (
-          <OrderCard
-            key={order.id}
-            order={order}
-            inventory={inventory}
-            onScanProduct={() => openProductScan(order.id)}
-            onSetQty={qty => setOrders(prev => prev.map(o => o.id === order.id ? { ...o, quantity: qty } : o))}
-            onSelectProduct={productId => selectProduct(order.id, productId)}
-            onFinalize={() => finalizeOrder(order.id)}
-            onRemove={() => setOrders(prev => prev.filter(o => o.id !== order.id))}
-          />
-        ))}
-      </div>
+      {orders.length === 0 && (
+        <div
+          className="card"
+          onDragOver={e => { e.preventDefault(); setDropOver(true) }}
+          onDragLeave={() => setDropOver(false)}
+          onDrop={handleMultiDrop}
+          style={{
+            textAlign: 'center', padding: '3rem 2rem', color: 'var(--text-muted)',
+            border: dropOver ? '2px dashed #6366f1' : '2px dashed var(--border)',
+            background: dropOver ? 'rgba(99,102,241,0.06)' : undefined,
+            transition: 'all 0.15s',
+          }}
+        >
+          <div style={{ fontSize: '3rem', marginBottom: '0.75rem' }}>
+            {queueInfo.active ? '⏳' : dropOver ? '📂' : '📷'}
+          </div>
+          {queueInfo.active ? (
+            <div>
+              <p style={{ fontWeight: 700, fontSize: '0.95rem', color: '#f59e0b', marginBottom: '0.3rem' }}>
+                Processando {queueInfo.done + 1} de {queueInfo.total}...
+              </p>
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                Pode soltar mais etiquetas aqui — elas entram na fila automaticamente
+              </p>
+              {/* barra de progresso */}
+              <div style={{ margin: '0.75rem auto', maxWidth: 260, height: 6, borderRadius: 99, background: 'var(--border)' }}>
+                <div style={{
+                  height: '100%', borderRadius: 99, background: '#f59e0b',
+                  width: `${Math.round((queueInfo.done / queueInfo.total) * 100)}%`,
+                  transition: 'width 0.4s',
+                }} />
+              </div>
+            </div>
+          ) : dropOver ? (
+            <p style={{ fontWeight: 700, fontSize: '0.95rem', color: '#6366f1' }}>
+              Solte para adicionar à fila
+            </p>
+          ) : (
+            <div>
+              <p style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: '0.4rem' }}>Nenhuma etiqueta na fila</p>
+              <p style={{ fontSize: '0.82rem', marginBottom: '0.75rem', lineHeight: 1.6 }}>
+                Clique em <strong>Adicionar Etiqueta</strong> para usar a câmera,<br/>
+                ou arraste fotos aqui — processa uma por vez, sem erros.
+              </p>
+              <div style={{
+                display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+                padding: '0.5rem 1rem', borderRadius: 8,
+                border: '1.5px dashed #6366f1', color: '#6366f1',
+                fontSize: '0.8rem', marginBottom: '1rem',
+              }}>
+                ➕ Arraste etiquetas aqui (uma por vez ou várias de uma vez)
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
+      {orders.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          {orders.map(order => (
+            <OrderCard
+              key={order.id}
+              order={order}
+              inventory={inventory}
+              selected={selected.has(order.id)}
+              onToggleSelect={() => toggleSelect(order.id)}
+              onScanProduct={() => openProductScan(order.id)}
+              onSetQty={qty => setOrders(prev => prev.map(o => o.id === order.id ? { ...o, quantity: qty } : o))}
+              onSelectProduct={productId => selectProduct(order.id, productId)}
+              onFinalize={() => finalizeOrder(order.id)}
+              onRemove={() => setOrders(prev => prev.filter(o => o.id !== order.id))}
+            />
+          ))}
+        </div>
+      )}
 
-      {/* Modal da câmera (etiqueta) */}
       {camera && (
         <CameraModal
-          title="📷 Scanner de Etiqueta"
-          subtitle="Enquadre o texto do destinatário da etiqueta"
+          title="Scanner de Etiqueta"
+          subtitle="Enquadre o texto do destinatario da etiqueta"
           onCapture={handleCapture}
           onClose={() => setCamera(null)}
         />
       )}
 
-      {/* Modal QR Code (produto) */}
       {qrCamera && (
         <QrScannerModal
           key={qrKey}
-          title="🏷️ QR Code do Produto"
-          subtitle="Aponte para o QR Code da embalagem — leitura automática"
+          title="QR Code do Produto"
+          subtitle="Aponte para o QR Code da embalagem - leitura automatica"
           onScan={(data) => handleQrScan(data, qrCamera.orderId)}
           onClose={() => setQrCamera(null)}
         />
