@@ -3,8 +3,11 @@ import { analyzeText, analyzeDocument } from '../lib/gemini'
 import { supabase } from '../lib/supabase'
 import { generateId, formatDate, formatCurrency } from '../utils/formatting'
 import { geocode, packLocation } from '../utils/location'
-import { hasLabelHeuristic, playBeep, preprocessCanvas, scoreLabel, mergeData } from '../utils/labelDetect'
+import { hasLabelHeuristic, playBeep, preprocessCanvas } from '../utils/labelDetect'
 import { parseQRData, qrDedupKey } from '../utils/qrParser'
+import { parseBrazilianLabel, normalizeOCRText } from '../utils/labelParser'
+import { buildConfidence, getDecision } from '../utils/labelConfidence'
+import { saveCorrection } from '../utils/labelMemory'
 import Tesseract from 'tesseract.js'
 import jsQR from 'jsqr'
 
@@ -444,7 +447,7 @@ function OrderCard({ order, inventory, selected, onToggleSelect, onScanProduct, 
 }
 
 // ─── Modal de leitura automática contínua ────────────────────────────────────
-function AutoScanModal({ onCapture, onAddOrder, onClose, addToast, inventory, pessoas }) {
+function AutoScanModal({ onCapture, onAddOrder, onQuickReview, onClose, addToast, inventory, pessoas }) {
   const videoRef      = useRef(null)
   const canvasRef     = useRef(null)
   const streamRef     = useRef(null)
@@ -537,7 +540,7 @@ function AutoScanModal({ onCapture, onAddOrder, onClose, addToast, inventory, pe
     const dataUrl = preprocessCanvas(canvas)
 
     if (qrCode) {
-      // ── Caminho QR: pipeline completo ────────────────────────────────────
+      // ── Caminho QR: pipeline inteligente (parser local + confiança) ───────
       setStatus('processando')
       playBeep('pending')
 
@@ -545,45 +548,97 @@ function AutoScanModal({ onCapture, onAddOrder, onClose, addToast, inventory, pe
         // 1. Parse rápido do QR
         const qrParsed = parseQRData(qrCode)
 
-        // 2. OCR local no frame congelado
-        const { data: { text: rawText } } = await Tesseract.recognize(dataUrl, 'por')
+        // 2. OCR local — uma única vez no frame congelado
+        const { data: { text: rawOCR } } = await Tesseract.recognize(dataUrl, 'por')
+        const rawText = normalizeOCRText(rawOCR)
 
-        // 3. Análise Gemini do texto (com retry automático já embutido)
-        let ocrData = null
-        try {
-          ocrData = await analyzeText(rawText, inventory || [], pessoas || [])
-        } catch { /* Gemini falhou — usa só o QR */ }
+        // 3. Parser local especializado — sem chamada de API
+        const parsed = parseBrazilianLabel(rawText)
 
-        // 4. Mescla QR (preciso) + OCR (rico em contexto)
-        const merged = mergeData(qrParsed, ocrData || {})
+        // 4. Mescla: QR tem prioridade em tracking/orderId/cep
+        const merged = {
+          // ── Campos enriquecidos ──────────────────────────────────────────
+          recipientName:     parsed.recipientName     || null,
+          street:            parsed.street            || null,
+          addressNumber:     parsed.addressNumber     || null,
+          addressComplement: parsed.addressComplement || null,
+          neighborhood:      parsed.neighborhood      || null,
+          city:              parsed.city              || null,
+          state:             parsed.state             || null,
+          trackingCode:      qrParsed.trackingCode    || parsed.trackingCode || null,
+          orderId:           qrParsed.orderId         || parsed.orderId      || null,
+          cep:               qrParsed.cep             || parsed.cep          || null,
+          // ── Campos legacy (compatibilidade com OrderCard) ────────────────
+          customerName:  parsed.recipientName || null,
+          location:      parsed.city          || null,
+          bairro:        parsed.neighborhood  || null,
+          address:       parsed.street        || null,
+          rastreio:      qrParsed.trackingCode || parsed.trackingCode || null,
+          modalidade:    null,
+          nf:            null,
+        }
 
-        // 5. Score de confiança
-        const score = scoreLabel(merged)
+        // 5. Source flags
+        const source = { qr: true, barcode: false, ocr: true, cepFallback: false }
 
-        // 6. Monta objeto final estruturado
+        // 6. Confiança por campo + geral
+        const confidence = buildConfidence(merged, source)
+
+        // 7. Decisão: 'auto' | 'quick' | 'manual'
+        const decision = getDecision(confidence)
+
         const labelData = {
           ...merged,
           qrCode,
-          rawText: rawText?.slice(0, 400) || '',
-          confidence: {
-            score,
-            high:   score >= 65,
-            medium: score >= 35 && score < 65,
-          },
-          source: { qr: true, ocr: !!ocrData },
+          barcode:        null,
+          rawText:        rawText?.slice(0, 400) || '',
+          confidence,
+          source,
+          reviewRequired: decision !== 'auto',
         }
 
-        playBeep('success')
-
-        if (score >= 35 || merged.trackingCode || merged.orderId) {
-          // Confiança suficiente → adiciona direto ao lote
+        if (decision === 'auto') {
+          playBeep('success')
           onAddOrder(labelData)
+        } else if (decision === 'quick') {
+          playBeep('pending')
+          onQuickReview(labelData)
         } else {
-          // Confiança baixa mas tem imagem → fila normal com OCR completo
-          onCapture(dataUrl)
+          // Confiança baixa → enriquece com Gemini e re-avalia
+          playBeep('pending')
+          try {
+            const geminiData = await analyzeText(rawOCR, inventory || [], pessoas || [])
+            if (geminiData) {
+              const enriched = {
+                ...labelData,
+                recipientName: geminiData.customerName || labelData.recipientName,
+                customerName:  geminiData.customerName || labelData.customerName,
+                city:          geminiData.location     || labelData.city,
+                location:      geminiData.location     || labelData.location,
+                bairro:        geminiData.bairro        || labelData.bairro,
+                neighborhood:  geminiData.bairro        || labelData.neighborhood,
+                address:       geminiData.address       || labelData.address,
+                street:        geminiData.address       || labelData.street,
+                modalidade:    geminiData.modalidade    || null,
+              }
+              const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
+              enriched.confidence    = enrichedConf
+              enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
+              if (getDecision(enrichedConf) === 'auto') {
+                playBeep('success')
+                onAddOrder(enriched)
+              } else {
+                onQuickReview(enriched)
+              }
+            } else {
+              onCapture(dataUrl)
+            }
+          } catch {
+            onCapture(dataUrl)
+          }
         }
       } catch {
-        // Qualquer erro → fallback para fila normal
+        // Qualquer erro → fallback fila normal
         onCapture(dataUrl)
         playBeep('error')
       }
@@ -712,6 +767,124 @@ function AutoScanModal({ onCapture, onAddOrder, onClose, addToast, inventory, pe
   )
 }
 
+// ─── Modal de revisão rápida ──────────────────────────────────────────────────
+function QuickReviewModal({ labelData, onConfirm, onDiscard }) {
+  const [fields, setFields] = useState({
+    recipientName: labelData.recipientName || labelData.customerName || '',
+    city:          labelData.city          || labelData.location     || '',
+    cep:           labelData.cep           || '',
+    orderId:       labelData.orderId       || '',
+    trackingCode:  labelData.trackingCode  || labelData.rastreio     || '',
+  })
+
+  const conf    = labelData.confidence || {}
+  const overall = conf.overall ?? 0
+
+  function borderFor(field) {
+    const sc = conf[field] ?? 0
+    if (sc >= 68) return '#10b981'
+    if (sc >= 38) return '#f59e0b'
+    return '#ef4444'
+  }
+
+  const FIELDS = [
+    { key: 'recipientName', label: 'Destinatário', icon: '👤', mono: false },
+    { key: 'city',          label: 'Cidade',       icon: '📍', mono: false },
+    { key: 'cep',           label: 'CEP',          icon: '📮', mono: true  },
+    { key: 'orderId',       label: 'Pedido',       icon: '🔖', mono: true  },
+    { key: 'trackingCode',  label: 'Rastreio',     icon: '📦', mono: true  },
+  ]
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 5000,
+      background: 'rgba(0,0,0,0.72)',
+      display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+    }}>
+      <div className="card" style={{
+        width: '100%', maxWidth: 480, margin: 0,
+        borderRadius: '16px 16px 0 0',
+        padding: '1.25rem 1.25rem 1.75rem',
+        boxShadow: '0 -8px 40px rgba(0,0,0,0.5)',
+      }}>
+        {/* Cabeçalho */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.9rem' }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 700 }}>⚡ Revisão Rápida</h3>
+            <p style={{ margin: '3px 0 0', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+              Confiança {overall}% — corrija os campos marcados em vermelho/amarelo
+            </p>
+          </div>
+          <span style={{
+            fontSize: '0.68rem', fontWeight: 700, padding: '3px 8px', borderRadius: 99,
+            background: overall >= 68 ? 'rgba(16,185,129,0.15)' : overall >= 38 ? 'rgba(245,158,11,0.15)' : 'rgba(239,68,68,0.15)',
+            color:      overall >= 68 ? '#10b981'               : overall >= 38 ? '#f59e0b'               : '#ef4444',
+          }}>
+            {overall >= 68 ? '🟢 Alta' : overall >= 38 ? '🟡 Média' : '🔴 Baixa'}
+          </span>
+        </div>
+
+        {/* Campos editáveis */}
+        {FIELDS.map(({ key, label, icon, mono }) => (
+          <div key={key} style={{ marginBottom: '0.55rem' }}>
+            <label style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 2,
+            }}>
+              {icon} {label}
+              {(conf[key] ?? 0) > 0 && (
+                <span style={{ color: borderFor(key), fontWeight: 700, marginLeft: 2 }}>
+                  {conf[key]}%
+                </span>
+              )}
+            </label>
+            <input
+              type="text"
+              value={fields[key]}
+              onChange={e => setFields(p => ({ ...p, [key]: e.target.value }))}
+              placeholder={`${label}...`}
+              style={{
+                width: '100%', boxSizing: 'border-box',
+                padding: '7px 10px',
+                fontSize: mono ? '0.78rem' : '0.84rem',
+                fontFamily: mono ? 'monospace' : 'inherit',
+                borderRadius: 7,
+                border: `1.5px solid ${fields[key] ? borderFor(key) : '#475569'}`,
+                background: '#1e293b', color: '#f1f5f9', outline: 'none',
+              }}
+            />
+          </div>
+        ))}
+
+        {/* Ações */}
+        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
+          <button
+            className="btn btn-secondary btn-sm"
+            style={{ flex: 1 }}
+            onClick={onDiscard}
+          >
+            Descartar
+          </button>
+          <button
+            className="btn btn-sm"
+            style={{ flex: 2, background: 'var(--success)', color: '#fff', border: 'none', fontWeight: 700, fontSize: '0.82rem' }}
+            onClick={() => onConfirm({
+              ...labelData,
+              ...fields,
+              // atualiza campos legacy também
+              customerName: fields.recipientName,
+              location:     fields.city,
+              rastreio:     fields.trackingCode,
+            })}
+          >
+            ✅ Confirmar e Salvar
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Componente principal ─────────────────────────────────────────────────────
 export function BatchScanner({ inventory, setInventory, transactions, setTransactions, pessoas, setPessoas, addToast }) {
   const [orders, setOrders] = useState([])
@@ -727,7 +900,8 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
   const isProcessingRef    = useRef(false)             // flag: já há processamento ativo
   const processLabelImgRef = useRef(null)              // ref para sempre ter a versão atual
   const finalizingRef      = useRef(new Set())         // ids sendo finalizados agora (trava duplo clique)
-  const [queueInfo, setQueueInfo] = useState({ active: false, total: 0, done: 0 })
+  const [queueInfo, setQueueInfo]   = useState({ active: false, total: 0, done: 0 })
+  const [quickReview, setQuickReview] = useState(null)   // labelData aguardando revisão rápida
 
   // ── Abre câmera para ler etiqueta ───────────────────────────────────────────
   const openLabelScan = () => setCamera({ mode: 'label' })
@@ -830,10 +1004,34 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       quantity: 1,
     }])
     const name  = labelData.customerName || labelData.recipientName || 'Destinatário'
-    const score = labelData.confidence?.score ?? 0
-    const tag   = score >= 65 ? '🟢' : '🟡'
+    const score = labelData.confidence?.overall ?? labelData.confidence?.score ?? 0
+    const tag   = score >= 68 ? '🟢' : '🟡'
     addToast(`${tag} ${name} — confiança ${score}%`, 'success')
   }, [addToast])
+
+  // ── Recebe etiqueta de confiança média → abre QuickReviewModal ─────────────
+  const handleQuickReview = useCallback((labelData) => {
+    setQuickReview(labelData)
+  }, [])
+
+  // ── Confirma revisão rápida — salva correção + adiciona ao lote ────────────
+  const confirmQuickReview = useCallback((correctedData) => {
+    // Persiste a correção para aprendizado futuro
+    if (quickReview) saveCorrection(quickReview, correctedData, 'quick')
+
+    const id = generateId()
+    setOrders(prev => [...prev, {
+      id,
+      status: 'needs_product',
+      labelData: correctedData,
+      productData: null,
+      quantity: 1,
+    }])
+    const name  = correctedData.recipientName || correctedData.customerName || 'Destinatário'
+    const score = correctedData.confidence?.overall ?? 0
+    addToast(`✅ ${name} — revisado (${score}%)`, 'success')
+    setQuickReview(null)
+  }, [quickReview, addToast])
 
   // ── Abre scanner QR para o produto de um pedido específico ─────────────────
   const openProductScan = (orderId) => {
@@ -1267,10 +1465,19 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
         <AutoScanModal
           onCapture={handleAutoCapture}
           onAddOrder={handleAutoAddOrder}
+          onQuickReview={handleQuickReview}
           onClose={() => setAutoScan(false)}
           addToast={addToast}
           inventory={inventory}
           pessoas={pessoas}
+        />
+      )}
+
+      {quickReview && (
+        <QuickReviewModal
+          labelData={quickReview}
+          onConfirm={confirmQuickReview}
+          onDiscard={() => setQuickReview(null)}
         />
       )}
     </div>
