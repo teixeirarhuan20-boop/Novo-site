@@ -264,8 +264,8 @@ export default function App() {
           ☰
         </button>
         <span className="mobile-logo">MEU NEGÓCIO <span>PRO</span></span>
-        <button className="mobile-chat-btn" onClick={() => setChatOpen(o => !o)} aria-label="Chat Luna">
-          💬
+        <button className="mobile-chat-btn" onClick={() => setChatOpen(o => !o)} aria-label="Chat Luna" title="Luna — Agente">
+          🤖
         </button>
       </header>
 
@@ -317,7 +317,4 @@ export default function App() {
         </div>
       )}
 
-      <ToastContainer toasts={toasts} onRemove={removeToast} />
-    </div>
-  )
-}
+      <ToastContainer toasts={toasts} onRemove={removeTo
