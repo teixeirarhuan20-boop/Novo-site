@@ -442,33 +442,36 @@ export async function analyzeDocument(fileBase64, inventory, customers) {
 
   const inventoryCtx = inventory?.slice(0, 40).map(i => i.name).join(' | ') || 'Vazio'
 
-  const prompt = `Você é um scanner especializado em etiquetas de envio brasileiras (Shopee, Correios, Mercado Livre, Jadlog).
+  const prompt = `Você é um scanner especializado em etiquetas de envio brasileiras (Shopee, Correios, Mercado Livre, Jadlog, Total Express).
 
-TAREFA: Leia TODA a imagem e extraia os dados do DESTINATÁRIO.
+TAREFA PRINCIPAL: Extrair o NOME DO DESTINATÁRIO e os demais dados de entrega da imagem.
 
-ESTRUTURA TÍPICA (de cima para baixo):
-1. Caixa/Bloco "DESTINATÁRIO" em negrito — o texto imediatamente abaixo é o NOME DO CLIENTE
-2. Linha de endereço (rua, número, complemento, cidade, estado)
-3. Linhas: "Bairro: ...", "CEP: ...", "Pedido: ..."
-4. QR codes, códigos de rota (SP2-2, LSP-16, etc.)
-5. Código de barras = código de rastreio
+COMO ENCONTRAR O NOME:
+- Procure o bloco/caixa com o título "DESTINATÁRIO" ou "PARA:" em negrito ou caixa separada
+- O NOME está na primeira linha de texto logo ABAIXO desse título
+- O nome é sempre de uma pessoa física (ex: "Maria Silva Santos") ou empresa
+- NUNCA confunda com o nome do REMETENTE/VENDEDOR (geralmente no canto oposto da etiqueta)
+- Se houver dúvida entre dois nomes, escolha o que está na seção de destino (endereço de entrega)
 
 CAMPOS A EXTRAIR:
-- customerName: NOME COMPLETO da pessoa logo abaixo de "DESTINATÁRIO". Ex: "Laussani Pereira Campos". NUNCA use nome do remetente/vendedor.
-- address: só rua + número + complemento. Ex: "Avenida Abílio Augusto Távora, 3555, Bloco 17 apto 101"
+- customerName: NOME COMPLETO do destinatário (pessoa ou empresa). Ex: "Laussani Pereira Campos". Obrigatório se visível.
+- address: rua + número + complemento do destinatário. Ex: "Av Abílio Augusto Távora, 3555, Bloco 17 Apto 101"
 - bairro: bairro do destinatário. Ex: "Jardim Alvorada"
 - cep: CEP com traço. Ex: "26265-090"
-- location: só o nome da cidade. Ex: "Nova Iguaçu"
-- orderId: código do pedido. Ex: "260411FTHFM6A7"
-- nf: número da nota fiscal (campo NF:). Ex: "1795"
-- rastreio: código de rastreio longo (começa com BR, JT, LB). Ex: "BR261423758638I"
-- modalidade: código de rota ou serviço. Ex: "JDF-C", "SEDEX", "PAC"
-- productName: null (a menos que algum produto abaixo combine: ${inventoryCtx})
+- location: cidade do destinatário. Ex: "Nova Iguaçu"
+- orderId: código alfanumérico do pedido (após "Pedido:", "#", ou similar). Ex: "260411FTHFM6A7"
+- nf: número da nota fiscal se houver campo "NF:". Ex: "1795"
+- rastreio: código de rastreio (começa com BR, JT, LB, NX, SB ou similar). Ex: "BR261423758638I"
+- modalidade: código de rota ou serviço de entrega. Ex: "JDF-C", "SEDEX", "PAC", "SP2-2"
+- productName: null (a menos que combine exatamente com: ${inventoryCtx})
 - quantity: 1
 
-IMPORTANTE: Se a imagem mostrar claramente o nome do destinatário, SEMPRE inclua em customerName. Não deixe null se conseguir ler.
+REGRAS ABSOLUTAS:
+1. customerName NUNCA deve ser null se houver qualquer nome legível na etiqueta
+2. Ignore ruídos, QR codes, barcodes e códigos numéricos longos (esses não são nomes)
+3. Se a imagem estiver cortada mostrando só parte da etiqueta, extraia o que conseguir ver
 
-Retorne APENAS JSON puro (sem markdown, sem explicações):
+Retorne APENAS JSON puro (sem markdown, sem \`\`\`, sem texto extra):
 {"customerName":"...","address":"...","bairro":"...","cep":"...","location":"...","orderId":"...","nf":null,"rastreio":null,"modalidade":null,"productName":null,"quantity":1}`
 
   // Verifica se o resultado tem pelo menos algum campo útil

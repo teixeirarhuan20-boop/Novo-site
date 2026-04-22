@@ -198,7 +198,7 @@ function CameraModal({ title, subtitle, onCapture, onClose }) {
       videoRef.current.srcObject = stream
       await videoRef.current.play()
       setActive(true)
-      setMsg('Posicione a etiqueta no quadro e capture')
+      setMsg('Enquadre a seção DESTINATÁRIO no guia azul')
     } catch {
       setMsg('❌ Câmera não disponível.')
     }
@@ -209,29 +209,33 @@ function CameraModal({ title, subtitle, onCapture, onClose }) {
     streamRef.current?.getTracks().forEach(t => t.stop())
   }
 
+  // Proporções do guia: deve bater EXATAMENTE com o overlay CSS (92% × 36%, centralizado)
+  const GUIDE_W_RATIO = 0.92
+  const GUIDE_H_RATIO = 0.36
+
   const capture = () => {
     const v = videoRef.current;
     const canvas = document.createElement('canvas');
-    canvas.width = v.videoWidth;
+    canvas.width  = v.videoWidth;
     canvas.height = v.videoHeight;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(v, 0, 0);
 
-    // Pré-processamento: Contraste e Grayscale para maximizar a precisão do OCR
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const pix = imgData.data;
-    const contrast = 60; 
-    const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
+    // ── Crop para a área do guia ──────────────────────────────────────────────
+    // Recorta exatamente o retângulo visível no overlay para eliminar ruído externo
+    const gW = Math.round(canvas.width  * GUIDE_W_RATIO)
+    const gH = Math.round(canvas.height * GUIDE_H_RATIO)
+    const gX = Math.round((canvas.width  - gW) / 2)
+    const gY = Math.round((canvas.height - gH) / 2)
 
-    for (let i = 0; i < pix.length; i += 4) {
-      let gray = 0.2126 * pix[i] + 0.7152 * pix[i + 1] + 0.0722 * pix[i + 2];
-      gray = factor * (gray - 128) + 128;
-      pix[i] = pix[i + 1] = pix[i + 2] = Math.max(0, Math.min(255, gray));
-    }
-    ctx.putImageData(imgData, 0, 0);
-    
+    const crop = document.createElement('canvas')
+    crop.width  = gW
+    crop.height = gH
+    crop.getContext('2d').drawImage(canvas, gX, gY, gW, gH, 0, 0, gW, gH)
+
     stopCam();
-    onCapture(canvas.toDataURL('image/jpeg', 0.85));
+    // Qualidade 0.92 — melhor para Gemini Vision reconhecer texto fino
+    onCapture(crop.toDataURL('image/jpeg', 0.92));
   };
 
   function handleFile(e) {
@@ -264,17 +268,37 @@ function CameraModal({ title, subtitle, onCapture, onClose }) {
         </div>
 
         {/* Vídeo */}
-        <div style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', background: '#0f172a', height: '320px' }}>
+        <div style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', background: '#0f172a', height: '300px' }}>
           <video ref={videoRef} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted playsInline />
           {active && (
             <div style={{
               position: 'absolute', top: '50%', left: '50%',
               transform: 'translate(-50%,-50%)',
-              width: '85%', height: '60%',
-              border: '2px solid #3b82f6', borderRadius: 8,
-              boxShadow: '0 0 0 9999px rgba(0,0,0,0.5)',
+              width: '92%', height: '36%',
+              borderRadius: 6,
+              boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)',
               pointerEvents: 'none',
             }}>
+              {/* Borda colorida */}
+              <div style={{ position: 'absolute', inset: 0, border: '2px solid #3b82f6', borderRadius: 6 }} />
+              {/* Cantos de mira */}
+              {[
+                { top: -2, left: -2,   borderTop: '3px solid #60a5fa', borderLeft:  '3px solid #60a5fa' },
+                { top: -2, right: -2,  borderTop: '3px solid #60a5fa', borderRight: '3px solid #60a5fa' },
+                { bottom: -2, left: -2,  borderBottom: '3px solid #60a5fa', borderLeft:  '3px solid #60a5fa' },
+                { bottom: -2, right: -2, borderBottom: '3px solid #60a5fa', borderRight: '3px solid #60a5fa' },
+              ].map((s, i) => (
+                <div key={i} style={{ position: 'absolute', width: 18, height: 18, ...s }} />
+              ))}
+              {/* Instrução centrada */}
+              <div style={{
+                position: 'absolute', bottom: -24, left: 0, right: 0,
+                textAlign: 'center', fontSize: '0.67rem',
+                color: '#93c5fd', fontWeight: 600, letterSpacing: '0.03em',
+                textShadow: '0 1px 3px rgba(0,0,0,0.8)',
+              }}>
+                ↕ Encaixe o bloco DESTINATÁRIO nesta faixa
+              </div>
             </div>
           )}
         </div>
@@ -622,7 +646,7 @@ function AutoScanModal({ onCapture, onAddOrder, onQuickReview, onClose, addToast
         const parsed = parseBrazilianLabel(rawText)
 
         // 4. Mescla: QR tem prioridade em tracking/orderId/cep
-        const merged = {
+        let merged = {
           // ── Campos enriquecidos ──────────────────────────────────────────
           recipientName:     parsed.recipientName     || null,
           street:            parsed.street            || null,
@@ -645,7 +669,17 @@ function AutoScanModal({ onCapture, onAddOrder, onQuickReview, onClose, addToast
         }
 
         // 5. Source flags
-        const source = { qr: true, barcode: false, ocr: true, cepFallback: false }
+        let source = { qr: true, barcode: false, ocr: true, cepFallback: false }
+
+        // 5b. Nome ausente → Gemini imediatamente
+        if (!merged.recipientName) {
+          let nameData = null
+          try { nameData = await analyzeText(rawOCR, inventory || [], pessoas || []) } catch {}
+          if (nameData?.customerName) {
+            merged = enrichWithGemini(merged, nameData)
+            source = { ...source, gemini: true }
+          }
+        }
 
         // 6. Confiança por campo + geral
         const confidence = buildConfidence(merged, source)
@@ -670,10 +704,10 @@ function AutoScanModal({ onCapture, onAddOrder, onQuickReview, onClose, addToast
           playBeep('pending')
           onQuickReview(labelData)
         } else {
-          // Confiança baixa → enriquece com Gemini e re-avalia
+          // Confiança baixa → Gemini (pula se já chamou acima)
           playBeep('pending')
           try {
-            const geminiData = await analyzeText(rawOCR, inventory || [], pessoas || [])
+            const geminiData = source.gemini ? null : await analyzeText(rawOCR, inventory || [], pessoas || [])
             if (geminiData) {
               const enriched = {
                 ...labelData,
@@ -982,9 +1016,20 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       const rawText = normalizeOCRText(rawOCR)
 
       // 2. Parser local especializado (sem API)
-      const parsed     = parseBrazilianLabel(rawText)
-      const merged     = buildMergedLabel({}, parsed)
-      const source     = { qr: false, barcode: false, ocr: true, cepFallback: false }
+      const parsed = parseBrazilianLabel(rawText)
+      let merged   = buildMergedLabel({}, parsed)
+      let source   = { qr: false, barcode: false, ocr: true, cepFallback: false }
+
+      // 2b. Nome ausente → Gemini imediatamente (parser local é ruim com nomes)
+      if (!merged.recipientName) {
+        let nameData = null
+        try { nameData = await analyzeText(rawOCR, inventory, pessoas) } catch {}
+        if (nameData?.customerName) {
+          merged = enrichWithGemini(merged, nameData)
+          source = { ...source, gemini: true }
+        }
+      }
+
       const confidence = buildConfidence(merged, source)
       const decision   = getDecision(confidence)
 
@@ -995,17 +1040,19 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
         return tempId
       }
 
-      // 4. Confiança baixa → Gemini texto como fallback
-      let geminiData = null
-      try { geminiData = await analyzeText(rawOCR, inventory, pessoas) } catch {}
+      // 4. Confiança baixa → Gemini texto como fallback (pula se já chamou acima)
+      if (!source.gemini) {
+        let geminiData = null
+        try { geminiData = await analyzeText(rawOCR, inventory, pessoas) } catch {}
 
-      if (geminiData && (geminiData.customerName || geminiData.location || geminiData.orderId)) {
-        const enriched     = enrichWithGemini(merged, geminiData)
-        const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
-        enriched.confidence    = enrichedConf
-        enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
-        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: enriched, status: 'needs_product' } : o))
-        return tempId
+        if (geminiData && (geminiData.customerName || geminiData.location || geminiData.orderId)) {
+          const enriched     = enrichWithGemini(merged, geminiData)
+          const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
+          enriched.confidence    = enrichedConf
+          enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
+          setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: enriched, status: 'needs_product' } : o))
+          return tempId
+        }
       }
 
       // 5. Último fallback: Gemini Vision
@@ -1190,81 +1237,54 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       setOrders(prev => [...prev, { id: tempId, status: 'loading', labelData: null, productData: null, quantity: 1 }])
 
       try {
-        // 1. OCR local — uma única vez
-        const { data: { text: rawOCR } } = await Tesseract.recognize(imageData, 'por')
-        const rawText = normalizeOCRText(rawOCR)
+        addToast('Analisando etiqueta...', 'info')
 
-        // 2. Parser local especializado (sem API)
-        const parsed     = parseBrazilianLabel(rawText)
-        const merged     = buildMergedLabel({}, parsed)
-        const source     = { qr: false, barcode: false, ocr: true, cepFallback: false }
+        // ── Gemini Vision + OCR em paralelo ─────────────────────────────────
+        // Vision: lê nome, cidade, endereço — muito superior ao OCR para texto real
+        // OCR: extrai CEP e código de rastreio (formato fixo, regex confiável)
+        const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
+        const [visionRes, ocrRes] = await Promise.allSettled([
+          analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas),
+          Tesseract.recognize(imageData, 'por'),
+        ])
+
+        const visionData = visionRes.status === 'fulfilled' ? visionRes.value : null
+        const rawOCR     = ocrRes.status === 'fulfilled'    ? ocrRes.value.data.text : ''
+        const rawText    = normalizeOCRText(rawOCR)
+        const parsed     = parseBrazilianLabel(rawText)    // OCR → campos estruturados
+
+        // ── Mescla inteligente: Vision ganha em nome/cidade, OCR ganha em CEP/rastreio
+        let merged = buildMergedLabel({}, parsed)
+        if (visionData?.customerName) {
+          merged = enrichWithGemini(merged, visionData)
+        }
+        // Garante que campos estruturados do OCR não sejam perdidos
+        merged.cep          = parsed.cep          || visionData?.cep     || merged.cep
+        merged.trackingCode = parsed.trackingCode || visionData?.rastreio || merged.trackingCode
+        merged.rastreio     = merged.trackingCode
+        merged.orderId      = parsed.orderId      || visionData?.orderId  || merged.orderId
+
+        const source = {
+          qr: false, barcode: false, ocr: !!rawOCR,
+          gemini: !!(visionData?.customerName),
+          cepFallback: false,
+        }
+
         const confidence = buildConfidence(merged, source)
         const decision   = getDecision(confidence)
+        const labelData  = { ...merged, confidence, source, reviewRequired: decision !== 'auto' }
 
-        if (decision !== 'manual') {
-          const labelData = { ...merged, confidence, source, reviewRequired: decision === 'quick' }
-          setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
+        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
 
-          if (decision === 'auto') {
-            // Alta confiança: abre QR scanner de produto automaticamente
-            addToast(`✅ ${merged.recipientName || 'Destinatário'} — confiança ${confidence.overall}%`, 'success')
-            setQrKey(k => k + 1)
-            setQrCamera({ orderId: tempId })
-          } else {
-            // Média confiança: QuickReview automático (câmera é modo interativo)
-            handleQuickReview(labelData, tempId)
-          }
-          return
-        }
-
-        // 3. Confiança baixa → Gemini texto
-        addToast('Refinando com IA...', 'info')
-        let geminiData = null
-        try { geminiData = await analyzeText(rawOCR, inventory, pessoas) } catch {}
-
-        if (geminiData && (geminiData.customerName || geminiData.location || geminiData.orderId)) {
-          const enriched     = enrichWithGemini(merged, geminiData)
-          const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
-          enriched.confidence    = enrichedConf
-          enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
-          setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: enriched, status: 'needs_product' } : o))
-          addToast(`✅ ${enriched.recipientName || 'Identificado'}`, 'success')
-          if (!enriched.reviewRequired) {
-            setQrKey(k => k + 1)
-            setQrCamera({ orderId: tempId })
-          } else {
-            handleQuickReview(enriched, tempId)
-          }
-          return
-        }
-
-        // 4. Último fallback: Gemini Vision
-        addToast('Refinando com IA visual...', 'info')
-        const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
-        const visionData = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
-        if (visionData && (visionData.customerName || visionData.location)) {
-          const enriched     = enrichWithGemini(merged, visionData)
-          const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
-          enriched.confidence    = enrichedConf
-          enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
-          setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: enriched, status: 'needs_product' } : o))
-          addToast(`✅ Lido pela IA: ${enriched.recipientName || 'OK'}`, 'success')
-          if (!enriched.reviewRequired) {
-            setQrKey(k => k + 1)
-            setQrCamera({ orderId: tempId })
-          } else {
-            handleQuickReview(enriched, tempId)
-          }
+        if (decision === 'auto') {
+          addToast(`✅ ${merged.recipientName || 'Destinatário'} — ${confidence.overall}%`, 'success')
+          setQrKey(k => k + 1)
+          setQrCamera({ orderId: tempId })
         } else {
-          // Fallbacks visuais falharam — se o parser local tem algo, mantém para revisão
-          const hasData = !!(merged.customerName || merged.recipientName || merged.trackingCode || merged.orderId || merged.cep)
-          if (hasData) {
-            const labelData = { ...merged, confidence, source, reviewRequired: true }
-            setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
-            handleQuickReview(labelData, tempId)
-            addToast('⚠️ Dados parciais — revise os campos', 'warning')
-          } else {
-            throw new Error('Não foi possível identificar o destinatário. Tente outra foto.')
+          // Qualquer coisa abaixo de 'auto' → abre revisão rápida imediatamente
+          handleQuickReview(labelData, tempId)
+          if (!merged.recipientName) {
+            addToast('⚠️ Nome não encontrado — preencha na revisão', 'warning')
           }
         }
       } catch (err) {
