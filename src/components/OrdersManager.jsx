@@ -903,11 +903,28 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
     addToast(`${ids.length} pedido${ids.length > 1 ? 's' : ''} excluído${ids.length > 1 ? 's' : ''}.`, 'info')
   }, [selectedIds, setTransactions, addToast])
 
+  // ── Helper: verifica se orderId ou rastreio já existe nas transações ────────
+  const isDuplicateOrder = useCallback((orderId, rastreio) => {
+    if (!orderId && !rastreio) return false
+    return transactions.some(t => {
+      if (t.type !== 'saída') return false
+      const loc = unpackLocation(t.itemName)
+      if (orderId  && loc?.orderId  && loc.orderId  === orderId)  return true
+      if (rastreio && loc?.rastreio && loc.rastreio === rastreio) return true
+      return false
+    })
+  }, [transactions])
+
   // ── Processa fila do scanner em lote ──────────────────────────────────────
   const processQueue = useCallback(async (items) => {
-    let ok = 0, fail = 0
+    let ok = 0, fail = 0, dup = 0
     for (const item of items) {
       try {
+        // Bloqueia duplicata real antes de salvar
+        if (isDuplicateOrder(item.orderId, item.rastreio)) {
+          addToast(`⚠️ Duplicata ignorada: ${item.customerName || item.orderId}`, 'warning')
+          dup++; continue
+        }
         const inv = inventory.find(i => i.id === item.selectedProduct)
         if (!inv) { fail++; continue }
         const qty = Number(item.quantity) || 1
@@ -946,10 +963,14 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
         addToast(`Erro: ${err.message}`, 'error'); fail++
       }
     }
-    if (ok > 0) addToast(`✅ ${ok} pedido${ok !== 1 ? 's' : ''} registrado${ok !== 1 ? 's' : ''}${fail > 0 ? ` · ${fail} com erro` : ''}!`, 'success')
+    const parts = []
+    if (ok   > 0) parts.push(`✅ ${ok} registrado${ok !== 1 ? 's' : ''}`)
+    if (dup  > 0) parts.push(`⚠️ ${dup} duplicata${dup !== 1 ? 's' : ''} ignorada${dup !== 1 ? 's' : ''}`)
+    if (fail > 0) parts.push(`❌ ${fail} com erro`)
+    if (parts.length) addToast(parts.join(' · '), ok > 0 ? 'success' : 'warning')
     setShowReview(false); setPendingQueue([])
     if (ok > 0) setPageTab('central')
-  }, [inventory, pessoas, setPessoas, setInventory, setTransactions, addToast])
+  }, [inventory, pessoas, setPessoas, setInventory, setTransactions, addToast, isDuplicateOrder])
 
   // ── Handlers do formulário (preservados intactos) ──
   const filteredProducts = useMemo(() => {
@@ -1073,25 +1094,4 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
         addToast('Não foi possível extrair dados. Tente uma foto mais próxima da etiqueta.', 'warning')
       }
     } catch (err) {
-      addToast(`Erro ao processar imagem: ${err.message}`, 'error')
-    } finally {
-      setDragProcessing(false)
-    }
-  }, [inventory, pessoas, handleLabelData, addToast])
-
-  const handleOrder = useCallback(async (e) => {
-    e.preventDefault()
-    if (!selectedItem || !selectedPessoa || quantity <= 0 || !location) {
-      addToast('Preencha todos os campos obrigatórios.', 'warning'); return
-    }
-    setProcessing(true)
-    try {
-      const item = inventory.find(i => i.id === selectedItem)
-      let pessoa = pessoas.find(p => p.name.toLowerCase() === selectedPessoa.toLowerCase())
-      if (!item) { addToast('Produto não encontrado.', 'error'); return }
-      if (Number(item.quantity) < Number(quantity)) { addToast('Estoque insuficiente!', 'error'); return }
-      if (!pessoa) {
-        pessoa = { id: generateId(), name: selectedPessoa.trim(), document: '', role: 'cliente', contact: '' }
-        if (setPessoas) setPessoas(prev => [...prev, pessoa])
-        await supabase.from('pessoas').insert([pessoa])
-        add
+      addToast(`Erro ao processa
