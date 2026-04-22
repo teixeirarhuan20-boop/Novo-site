@@ -1,6 +1,44 @@
-import React, { useState, useEffect, useRef } from 'react'
-import { analyzeDocument, analyzeText } from '../lib/gemini'
-import Tesseract from 'tesseract.js'
+import React, { useState, useRef } from 'react'
+import { analyzeDocument } from '../lib/gemini'
+
+// ─── Crop automático: detecta região clara (etiqueta branca) ─────────────────
+function cropToWhiteLabel(dataUrl) {
+  return new Promise(resolve => {
+    const img = new Image()
+    img.onload = () => {
+      const c = document.createElement('canvas')
+      c.width = img.width; c.height = img.height
+      const ctx = c.getContext('2d')
+      ctx.drawImage(img, 0, 0)
+      const imgData = ctx.getImageData(0, 0, c.width, c.height)
+      const { data, width, height } = imgData
+      let minX = width, maxX = 0, minY = height, maxY = 0
+      const BRIGHT = 175
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4
+          const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+          if (lum > BRIGHT) {
+            if (x < minX) minX = x; if (x > maxX) maxX = x
+            if (y < minY) minY = y; if (y > maxY) maxY = y
+          }
+        }
+      }
+      const w = maxX - minX, h = maxY - minY
+      if (w < 80 || h < 80) { resolve(dataUrl); return }
+      const PAD = 16
+      const sx = Math.max(0, minX - PAD), sy = Math.max(0, minY - PAD)
+      const sw = Math.min(width - sx, w + PAD * 2)
+      const sh = Math.min(height - sy, h + PAD * 2)
+      const out = document.createElement('canvas')
+      out.width = sw; out.height = sh
+      out.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh)
+      resolve(out.toDataURL('image/jpeg', 0.93))
+    }
+    img.onerror = () => resolve(dataUrl)
+    img.src = dataUrl
+  })
+}
 
 // ─── Modal de câmera — idêntico ao Scanner em Lote ───────────────────────────
 function CameraModal({ onCapture, onClose }) {
@@ -18,13 +56,13 @@ function CameraModal({ onCapture, onClose }) {
   async function startCam() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 } },
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       })
       streamRef.current = stream
       videoRef.current.srcObject = stream
       await videoRef.current.play()
       setActive(true)
-      setMsg('Posicione a etiqueta no quadro e capture')
+      setMsg('Posicione a etiqueta e capture')
     } catch {
       setMsg('❌ Câmera não disponível.')
     }
@@ -39,21 +77,10 @@ function CameraModal({ onCapture, onClose }) {
     const canvas = document.createElement('canvas')
     canvas.width  = v.videoWidth
     canvas.height = v.videoHeight
-    const ctx = canvas.getContext('2d')
-    ctx.drawImage(v, 0, 0)
-
-    // Pré-processamento: grayscale + contraste para melhorar OCR
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-    const pix = imgData.data
-    const factor = (259 * (60 + 255)) / (255 * (259 - 60))
-    for (let i = 0; i < pix.length; i += 4) {
-      let g = 0.2126 * pix[i] + 0.7152 * pix[i + 1] + 0.0722 * pix[i + 2]
-      g = Math.max(0, Math.min(255, factor * (g - 128) + 128))
-      pix[i] = pix[i + 1] = pix[i + 2] = g
-    }
-    ctx.putImageData(imgData, 0, 0)
+    canvas.getContext('2d').drawImage(v, 0, 0)
     stopCam()
-    onCapture(canvas.toDataURL('image/jpeg', 0.85))
+    // Envia imagem original colorida — Gemini Vision lê muito melhor assim
+    onCapture(canvas.toDataURL('image/jpeg', 0.92))
   }
 
   function handleFile(e) {
@@ -119,7 +146,6 @@ function CameraModal({ onCapture, onClose }) {
 export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }) {
   const [showCamera,     setShowCamera]     = useState(false)
   const [isProcessing,   setIsProcessing]   = useState(false)
-  const [progress,       setProgress]       = useState(0)
   const [previewUrl,     setPreviewUrl]     = useState(null)
   const [extractedData,  setExtractedData]  = useState(null)
   const [pastedText,     setPastedText]     = useState('')
@@ -132,37 +158,26 @@ export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }
     return () => clearInterval(t)
   }, [cooldown])
 
-  // ─── Processa imagem (base64 ou File) ─────────────────────────────────────
+  // ─── Processa imagem — Vision direto, sem OCR ────────────────────────────
   const processImage = async (base64OrDataUrl) => {
     setIsProcessing(true)
-    setProgress(0)
     setExtractedData(null)
 
     const dataUrl = base64OrDataUrl.startsWith('data:') ? base64OrDataUrl : `data:image/jpeg;base64,${base64OrDataUrl}`
     setPreviewUrl(dataUrl)
 
     try {
-      // 1) OCR local com Tesseract (gratuito, offline)
-      const { data: { text } } = await Tesseract.recognize(dataUrl, 'por', {
-        logger: m => { if (m.status === 'recognizing text') setProgress(Math.round(m.progress * 100)) },
-      })
+      // Crop automático: remove fundo marrom/papelão, mantém etiqueta branca
+      const cropped = await cropToWhiteLabel(dataUrl)
 
-      const result = await analyzeText(text, inventory || [], pessoas || [])
-      if (result && (result.customerName || result.orderId || result.rastreio || result.location)) {
+      // Vision AI direto — muito mais preciso que OCR para etiquetas Shopee
+      const result = await analyzeDocument(cropped, inventory || [], pessoas || [])
+
+      if (result && (result.customerName || result.orderId || result.rastreio || result.location || result.cep)) {
         setExtractedData(result)
-        addToast?.('✅ Etiqueta lida com sucesso!', 'success')
-        return
-      }
-
-      // 2) Fallback: Vision AI (se Tesseract não extraiu dados suficientes)
-      addToast?.('Refinando com IA visual...', 'info')
-      const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
-      const fallback = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory || [], pessoas || [])
-      if (fallback) {
-        setExtractedData(fallback)
-        addToast?.('✅ Dados extraídos pela IA!', 'success')
+        addToast?.('✅ Etiqueta lida!', 'success')
       } else {
-        addToast?.('Nenhum dado reconhecível na imagem.', 'warning')
+        addToast?.('Não foi possível extrair dados. Tente uma foto mais nítida.', 'warning')
       }
     } catch (err) {
       if (err.message?.includes('429') || err.message?.includes('Limite')) {
@@ -173,7 +188,6 @@ export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }
       }
     } finally {
       setIsProcessing(false)
-      setProgress(0)
     }
   }
 
@@ -190,6 +204,9 @@ export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }
     if (!pastedText.trim()) return
     setIsProcessing(true)
     try {
+      // Texto colado → renderiza como imagem simples e manda pro Vision
+      // (mantemos analyzeText como import dinâmico apenas se disponível)
+      const { analyzeText } = await import('../lib/gemini')
       const result = await analyzeText(pastedText, inventory || [], pessoas || [])
       if (result) {
         setExtractedData(result)
@@ -297,7 +314,7 @@ export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }
         </div>
       )}
 
-      {/* ── Preview da imagem + barra de progresso ── */}
+      {/* ── Preview + loading ── */}
       {isProcessing && (
         <div style={{
           background: '#0f172a', borderRadius: 12, padding: '1rem',
@@ -305,16 +322,12 @@ export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }
         }}>
           {previewUrl && (
             <img src={previewUrl} alt="preview" style={{
-              maxHeight: 80, borderRadius: 6, marginBottom: '0.6rem',
+              maxHeight: 80, borderRadius: 6,
               border: '1px solid #334155', display: 'block', margin: '0 auto 0.6rem',
             }} />
           )}
-          <div style={{ height: 6, background: '#1e293b', borderRadius: 10, overflow: 'hidden', marginBottom: '0.4rem' }}>
-            <div style={{ width: `${progress || 30}%`, height: '100%', background: '#3b82f6', transition: 'width 0.3s', borderRadius: 10 }} />
-          </div>
-          <span style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
-            {progress > 0 ? `Escaneando texto... ${progress}%` : 'Analisando com IA...'}
-          </span>
+          <div style={{ height: 4, background: 'linear-gradient(90deg,#3b82f6,#8b5cf6)', borderRadius: 10, marginBottom: '0.4rem', animation: 'pulse 1s infinite' }} />
+          <span style={{ fontSize: '0.76rem', color: '#94a3b8' }}>🤖 Analisando com Gemini Vision...</span>
         </div>
       )}
 
@@ -383,24 +396,4 @@ export function LabelAssistant({ inventory, pessoas, onDataExtracted, addToast }
               type="button"
               onClick={() => { setExtractedData(null); setPreviewUrl(null) }}
               style={{
-                padding: '0.7rem 1rem', borderRadius: 10,
-                background: 'none', color: '#94a3b8',
-                border: '1px solid #334155', cursor: 'pointer', fontSize: '0.88rem',
-              }}
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ── Modal de câmera ── */}
-      {showCamera && (
-        <CameraModal
-          onCapture={img => { setShowCamera(false); processImage(img) }}
-          onClose={() => setShowCamera(false)}
-        />
-      )}
-    </div>
-  )
-}
+                padding: '0.7rem 1rem', b
