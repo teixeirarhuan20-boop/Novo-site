@@ -46,16 +46,23 @@ function buildMergedLabel(qrParsed = {}, parsed = {}) {
 function enrichWithGemini(base = {}, gemini = {}) {
   return {
     ...base,
-    recipientName: gemini.customerName || base.recipientName,
-    customerName:  gemini.customerName || base.customerName,
-    city:          gemini.location     || base.city,
-    location:      gemini.location     || base.location,
-    bairro:        gemini.bairro        || base.bairro,
-    neighborhood:  gemini.bairro        || base.neighborhood,
-    address:       gemini.address       || base.address,
-    street:        gemini.address       || base.street,
-    modalidade:    gemini.modalidade    || base.modalidade || null,
-    nf:            gemini.nf            || base.nf         || null,
+    recipientName: gemini.customerName || base.recipientName || null,
+    customerName:  gemini.customerName || base.customerName  || null,
+    city:          gemini.location     || base.city          || null,
+    location:      gemini.location     || base.location      || null,
+    bairro:        gemini.bairro       || base.bairro        || null,
+    neighborhood:  gemini.bairro       || base.neighborhood  || null,
+    address:       gemini.address      || base.address       || null,
+    street:        gemini.address      || base.street        || null,
+    // CEP: OCR parser ganha (regex preciso) — Vision como fallback
+    cep:           base.cep            || gemini.cep         || null,
+    // Rastreio: OCR ganha — Vision como fallback
+    trackingCode:  base.trackingCode   || gemini.rastreio    || null,
+    rastreio:      base.rastreio       || gemini.rastreio    || null,
+    // OrderId: OCR ganha — Vision como fallback
+    orderId:       base.orderId        || gemini.orderId     || null,
+    modalidade:    gemini.modalidade   || base.modalidade    || null,
+    nf:            gemini.nf           || base.nf            || null,
   }
 }
 
@@ -1011,75 +1018,47 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
     const tempId = generateId()
     setOrders(prev => [...prev, { id: tempId, status: 'loading', labelData: null, productData: null, quantity: 1 }])
     try {
-      // 1. OCR local — uma única vez no frame
-      const { data: { text: rawOCR } } = await Tesseract.recognize(imageData, 'por')
-      const rawText = normalizeOCRText(rawOCR)
+      const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
 
-      // 2. Parser local especializado (sem API)
-      const parsed = parseBrazilianLabel(rawText)
-      let merged   = buildMergedLabel({}, parsed)
-      let source   = { qr: false, barcode: false, ocr: true, cepFallback: false }
+      // Vision + OCR em paralelo
+      const [visionRes, ocrRes] = await Promise.allSettled([
+        analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas),
+        Tesseract.recognize(imageData, 'por'),
+      ])
 
-      // 2b. Nome ausente → Gemini imediatamente (parser local é ruim com nomes)
-      if (!merged.recipientName) {
-        let nameData = null
-        try { nameData = await analyzeText(rawOCR, inventory, pessoas) } catch {}
-        if (nameData?.customerName) {
-          merged = enrichWithGemini(merged, nameData)
-          source = { ...source, gemini: true }
-        }
+      const visionData = visionRes.status === 'fulfilled' ? visionRes.value : null
+      const rawOCR     = ocrRes.status === 'fulfilled'    ? ocrRes.value.data.text : ''
+      const rawText    = normalizeOCRText(rawOCR)
+      const parsed     = parseBrazilianLabel(rawText)
+
+      // Merge direto: Vision vence em nome/endereço, OCR vence em CEP/rastreio
+      const labelData = {
+        recipientName:     visionData?.customerName  || parsed.recipientName || null,
+        customerName:      visionData?.customerName  || parsed.recipientName || null,
+        city:              visionData?.location       || parsed.city          || null,
+        location:          visionData?.location       || parsed.city          || null,
+        bairro:            visionData?.bairro          || parsed.neighborhood  || null,
+        neighborhood:      visionData?.bairro          || parsed.neighborhood  || null,
+        address:           visionData?.address         || parsed.street        || null,
+        street:            visionData?.address         || parsed.street        || null,
+        addressNumber:     parsed.addressNumber        || null,
+        addressComplement: parsed.addressComplement    || null,
+        state:             parsed.state                || null,
+        cep:          parsed.cep          || visionData?.cep      || null,
+        trackingCode: parsed.trackingCode || visionData?.rastreio  || null,
+        rastreio:     parsed.trackingCode || visionData?.rastreio  || null,
+        orderId:      parsed.orderId      || visionData?.orderId   || null,
+        modalidade:   visionData?.modalidade || null,
+        nf:           visionData?.nf         || null,
+        reviewRequired: false,
       }
 
-      const confidence = buildConfidence(merged, source)
-      const decision   = getDecision(confidence)
+      const hasData = !!(labelData.recipientName || labelData.cep || labelData.trackingCode || labelData.city)
+      if (!hasData) throw new Error('Nenhum dado identificado na etiqueta.')
 
-      // 3. Confiança suficiente → adiciona direto com indicador de revisão se necessário
-      if (decision !== 'manual') {
-        const labelData = { ...merged, confidence, source, reviewRequired: decision === 'quick' }
-        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
-        return tempId
-      }
+      setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
+      return tempId
 
-      // 4. Confiança baixa → Gemini texto como fallback (pula se já chamou acima)
-      if (!source.gemini) {
-        let geminiData = null
-        try { geminiData = await analyzeText(rawOCR, inventory, pessoas) } catch {}
-
-        if (geminiData && (geminiData.customerName || geminiData.location || geminiData.orderId)) {
-          const enriched     = enrichWithGemini(merged, geminiData)
-          const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
-          enriched.confidence    = enrichedConf
-          enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
-          setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: enriched, status: 'needs_product' } : o))
-          return tempId
-        }
-      }
-
-      // 5. Último fallback: Gemini Vision
-      let visionData = null
-      try {
-        const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
-        visionData = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
-      } catch {}
-      if (visionData && (visionData.customerName || visionData.location)) {
-        const enriched     = enrichWithGemini(merged, visionData)
-        const enrichedConf = buildConfidence(enriched, { ...source, gemini: true })
-        enriched.confidence    = enrichedConf
-        enriched.reviewRequired = getDecision(enrichedConf) !== 'auto'
-        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData: enriched, status: 'needs_product' } : o))
-        return tempId
-      }
-
-      // Fallbacks falharam — mas se o parser local encontrou algo, mantém o card para revisão
-      const hasData = !!(merged.customerName || merged.recipientName || merged.trackingCode || merged.orderId || merged.cep)
-      if (hasData) {
-        const labelData = { ...merged, confidence, source, reviewRequired: true }
-        setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
-        addToast('⚠️ Dados parciais — revise o card', 'warning')
-        return tempId
-      }
-
-      throw new Error('Nenhum dado identificado na etiqueta.')
     } catch (err) {
       setOrders(prev => prev.filter(o => o.id !== tempId))
       addToast(`Falha: ${err.message}`, 'error')
@@ -1239,10 +1218,9 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
       try {
         addToast('Analisando etiqueta...', 'info')
 
-        // ── Gemini Vision + OCR em paralelo ─────────────────────────────────
-        // Vision: lê nome, cidade, endereço — muito superior ao OCR para texto real
-        // OCR: extrai CEP e código de rastreio (formato fixo, regex confiável)
         const b64 = imageData.includes(',') ? imageData.split(',')[1] : imageData
+
+        // ── Vision + OCR em paralelo ────────────────────────────────────────
         const [visionRes, ocrRes] = await Promise.allSettled([
           analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas),
           Tesseract.recognize(imageData, 'por'),
@@ -1251,48 +1229,49 @@ export function BatchScanner({ inventory, setInventory, transactions, setTransac
         const visionData = visionRes.status === 'fulfilled' ? visionRes.value : null
         const rawOCR     = ocrRes.status === 'fulfilled'    ? ocrRes.value.data.text : ''
         const rawText    = normalizeOCRText(rawOCR)
-        const parsed     = parseBrazilianLabel(rawText)    // OCR → campos estruturados
+        const parsed     = parseBrazilianLabel(rawText)
 
-        // ── Mescla inteligente: Vision ganha em nome/cidade, OCR ganha em CEP/rastreio
-        let merged = buildMergedLabel({}, parsed)
-        if (visionData?.customerName) {
-          merged = enrichWithGemini(merged, visionData)
+        // ── Merge direto: Vision vence em nome/endereço, OCR vence em CEP/rastreio
+        const labelData = {
+          recipientName:     visionData?.customerName  || parsed.recipientName || null,
+          customerName:      visionData?.customerName  || parsed.recipientName || null,
+          city:              visionData?.location       || parsed.city          || null,
+          location:          visionData?.location       || parsed.city          || null,
+          bairro:            visionData?.bairro          || parsed.neighborhood  || null,
+          neighborhood:      visionData?.bairro          || parsed.neighborhood  || null,
+          address:           visionData?.address         || parsed.street        || null,
+          street:            visionData?.address         || parsed.street        || null,
+          addressNumber:     parsed.addressNumber        || null,
+          addressComplement: parsed.addressComplement    || null,
+          state:             parsed.state                || null,
+          // OCR regex é mais preciso para campos formatados → prioridade
+          cep:          parsed.cep          || visionData?.cep      || null,
+          trackingCode: parsed.trackingCode || visionData?.rastreio  || null,
+          rastreio:     parsed.trackingCode || visionData?.rastreio  || null,
+          orderId:      parsed.orderId      || visionData?.orderId   || null,
+          modalidade:   visionData?.modalidade || null,
+          nf:           visionData?.nf         || null,
+          reviewRequired: false,
         }
-        // Garante que campos estruturados do OCR não sejam perdidos
-        merged.cep          = parsed.cep          || visionData?.cep     || merged.cep
-        merged.trackingCode = parsed.trackingCode || visionData?.rastreio || merged.trackingCode
-        merged.rastreio     = merged.trackingCode
-        merged.orderId      = parsed.orderId      || visionData?.orderId  || merged.orderId
 
-        const source = {
-          qr: false, barcode: false, ocr: !!rawOCR,
-          gemini: !!(visionData?.customerName),
-          cepFallback: false,
-        }
-
-        const confidence = buildConfidence(merged, source)
-        const decision   = getDecision(confidence)
-        const labelData  = { ...merged, confidence, source, reviewRequired: decision !== 'auto' }
+        const hasData = !!(labelData.recipientName || labelData.cep || labelData.trackingCode || labelData.city)
+        if (!hasData) throw new Error('Nenhum dado identificado. Ajuste a foto e tente novamente.')
 
         setOrders(prev => prev.map(o => o.id === tempId ? { ...o, labelData, status: 'needs_product' } : o))
 
-        if (decision === 'auto') {
-          addToast(`✅ ${merged.recipientName || 'Destinatário'} — ${confidence.overall}%`, 'success')
-          setQrKey(k => k + 1)
-          setQrCamera({ orderId: tempId })
-        } else {
-          // Qualquer coisa abaixo de 'auto' → abre revisão rápida imediatamente
-          handleQuickReview(labelData, tempId)
-          if (!merged.recipientName) {
-            addToast('⚠️ Nome não encontrado — preencha na revisão', 'warning')
-          }
-        }
+        const name = labelData.recipientName || labelData.city || 'Lido'
+        addToast(`✅ ${name} — preencha o produto`, 'success')
+
+        // Abre scanner de produto automaticamente
+        setQrKey(k => k + 1)
+        setQrCamera({ orderId: tempId })
+
       } catch (err) {
         setOrders(prev => prev.filter(o => o.id !== tempId))
         addToast(`Falha na leitura: ${err.message}`, 'error')
       }
     }
-  }, [camera, inventory, pessoas, addToast, handleQuickReview])
+  }, [camera, inventory, pessoas, addToast])
 
   // ── Seleciona produto manualmente ───────────────────────────────────────────
   const selectProduct = useCallback((orderId, productId) => {
