@@ -462,7 +462,7 @@ CAMPOS A EXTRAIR:
 - orderId: código alfanumérico do pedido (após "Pedido:", "#", ou similar). Ex: "260411FTHFM6A7"
 - nf: número da nota fiscal se houver campo "NF:". Ex: "1795"
 - rastreio: código de rastreio (começa com BR, JT, LB, NX, SB ou similar). Ex: "BR261423758638I"
-- modalidade: código de rota ou serviço de entrega. Ex: "JDF-C", "SEDEX", "PAC", "SP2-2"
+- modalidade: serviço ou zona de entrega. Ex: "SEDEX", "PAC", "JADLOG", "SC1-2", "SP2-2", "RESIDENCIAL", "COMERCIAL". Se houver banner "RESIDENCIAL" ou "COMERCIAL" na etiqueta, use esse valor.
 - productName: null (a menos que combine exatamente com: ${inventoryCtx})
 - quantity: 1
 
@@ -513,66 +513,4 @@ export async function analyzeText(inputText, inventory, customers) {
   const inventoryCtx = inventory?.slice(0, 50).map(i => i.name).join(', ') || 'Vazio'
   const customerCtx  = customers?.slice(0, 50).map(c => c.name).join(', ') || 'Vazio'
 
-  const prompt = `Você é um extrator de dados de etiquetas logísticas brasileiras (Shopee, Mercado Livre, Correios).
-
-Regras de extração:
-- customerName: nome completo do DESTINATÁRIO
-- address: SOMENTE rua + número + complemento, SEM cidade e SEM estado
-- bairro: bairro do destinatário
-- cep: CEP com traço. Ex: "04521-000"
-- location: SOMENTE nome da cidade
-- orderId: código do pedido. Ex: "260410FB4GUR2T"
-- nf: número da nota fiscal
-- rastreio: código de rastreio (BR..., LB..., JT...)
-- modalidade: código de rota como "SP2-2", "SEDEX", etc
-- productName: identifique nos PRODUTOS abaixo ou null
-- quantity: padrão 1
-
-PRODUTOS: [${inventoryCtx}]
-CLIENTES: [${customerCtx}]
-
-Retorne APENAS JSON puro:
-{"customerName":"...","address":"...","bairro":"...","cep":"...","location":"...","orderId":"...","nf":"...","rastreio":"...","modalidade":"...","productName":null,"quantity":1}
-
-TEXTO DA ETIQUETA:
-"""
-${inputText}
-"""`
-
-  if (groqKey) {
-    try {
-      const response = await callGroq(prompt)
-      return extractJson(response)
-    } catch (e) {
-      if (e.message !== 'RATE_LIMIT') console.warn('Groq falhou, usando Gemini...', e.message)
-    }
-  }
-
-  const text = await callGeminiText(prompt)
-  return extractJson(text)
-}
-
-export async function formatLabelText(inputText) {
-  const prompt = `Leia esta etiqueta e extraia os dados em formato de lista simples:
-
-Nome: [DADO]
-Cidade: [DADO]
-Bairro: [DADO]
-CEP: [DADO]
-Endereco: [DADO]
-Pedido: [DADO]
-NF: [DADO]
-Rastreio: [DADO]
-Modalidade: [DADO]
-
-TEXTO:
-"""
-${inputText}
-"""`
-
-  try {
-    return await callGeminiText(prompt)
-  } catch (e) {
-    return `Erro: ${e.message}`
-  }
-}
+  const prompt = `Você é um extrato

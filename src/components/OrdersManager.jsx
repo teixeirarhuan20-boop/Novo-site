@@ -1,11 +1,446 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { LabelAssistant } from './LabelAssistant'
-import { BatchScanner } from './BatchScanner'
+
 import { geocode, packLocation, unpackLocation, jitter } from '../utils/location'
 import { generateId, formatDate, normalizeText, formatCurrency } from '../utils/formatting'
-import { analyzeText, analyzeDocument } from '../lib/gemini'
-import Tesseract from 'tesseract.js'
+import { analyzeDocument } from '../lib/gemini'
+
+// ─── Crop automático da etiqueta ─────────────────────────────────────────────
+// Detecta a região clara (etiqueta branca) e elimina o fundo (papelão/mesa)
+function cropToWhiteLabel(dataUrl) {
+  return new Promise(resolve => {
+    const img = new Image()
+    img.onload = () => {
+      const c = document.createElement('canvas')
+      c.width = img.width; c.height = img.height
+      const ctx = c.getContext('2d')
+      ctx.drawImage(img, 0, 0)
+      const imgData = ctx.getImageData(0, 0, c.width, c.height)
+      const { data, width, height } = imgData
+
+      let minX = width, maxX = 0, minY = height, maxY = 0
+      const BRIGHT = 180 // luminância mínima para "branco/claro"
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4
+          const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+          if (lum > BRIGHT) {
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+          }
+        }
+      }
+
+      const w = maxX - minX, h = maxY - minY
+      if (w < 80 || h < 80) { resolve(dataUrl); return } // muito pequeno — usa original
+
+      const PAD = 14
+      const sx = Math.max(0, minX - PAD), sy = Math.max(0, minY - PAD)
+      const sw = Math.min(width  - sx, w + PAD * 2)
+      const sh = Math.min(height - sy, h + PAD * 2)
+
+      const out = document.createElement('canvas')
+      out.width = sw; out.height = sh
+      out.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh)
+      resolve(out.toDataURL('image/jpeg', 0.93))
+    }
+    img.onerror = () => resolve(dataUrl)
+    img.src = dataUrl
+  })
+}
+
+// ─── Bipe de confirmação ──────────────────────────────────────────────────────
+function playBeep() {
+  try {
+    const ac   = new (window.AudioContext || window.webkitAudioContext)()
+    const osc  = ac.createOscillator()
+    const gain = ac.createGain()
+    osc.connect(gain); gain.connect(ac.destination)
+    osc.frequency.value = 1047            // Dó5
+    gain.gain.setValueAtTime(0.28, ac.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.22)
+    osc.start(ac.currentTime); osc.stop(ac.currentTime + 0.22)
+  } catch {}
+}
+
+// ─── Camera Scanner — modo lote, leitura automática contínua ─────────────────
+function CameraScanner({ inventory, pessoas, transactions, onReviewQueue, onClose }) {
+  const videoRef     = useRef(null)
+  const canvasRef    = useRef(null)
+  const streamRef    = useRef(null)
+  const timerRef     = useRef(null)
+  const busyRef      = useRef(false)
+  const invRef       = useRef(inventory)
+  const pesRef       = useRef(pessoas)
+  const transRef     = useRef(transactions)
+  const queueRef     = useRef([])
+
+  useEffect(() => { invRef.current   = inventory   }, [inventory])
+  useEffect(() => { pesRef.current   = pessoas     }, [pessoas])
+  useEffect(() => { transRef.current = transactions }, [transactions])
+
+  const [phase,  setPhase]  = useState('init')   // init|scanning|reading
+  const [queue,  setQueue]  = useState([])
+  const [flash,  setFlash]  = useState(null)      // {name,isDup} — overlay 1.2s
+  const [torch,  setTorch]  = useState(false)
+  const [errMsg, setErrMsg] = useState('')
+
+  useEffect(() => { queueRef.current = queue }, [queue])
+
+  // ── Inicia câmera ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    let alive = true
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    }).then(stream => {
+      if (!alive) { stream.getTracks().forEach(t => t.stop()); return }
+      streamRef.current = stream
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        videoRef.current.play().then(() => setPhase('scanning')).catch(() => {})
+      }
+    }).catch(err => { setPhase('error'); setErrMsg(err.message) })
+    return () => {
+      alive = false
+      clearTimeout(timerRef.current)
+      streamRef.current?.getTracks().forEach(t => t.stop())
+    }
+  }, [])
+
+  // ── Captura automática ─────────────────────────────────────────────────────
+  const tryCapture = useCallback(async () => {
+    if (busyRef.current) return
+    const video  = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || video.readyState < 2 || !canvas) {
+      timerRef.current = setTimeout(tryCapture, 600); return
+    }
+
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(video, 0, 0)
+
+    // Detecção de etiqueta: mede % de pixels claros na janela central
+    const iw = canvas.width, ih = canvas.height
+    const rx = Math.floor(iw * 0.04), ry = Math.floor(ih * 0.28)
+    const rw = Math.floor(iw * 0.92), rh = Math.floor(ih * 0.44)
+    const { data } = ctx.getImageData(rx, ry, rw, rh)
+    let bright = 0
+    const step = 6, total = Math.floor(rw / step) * Math.floor(rh / step)
+    for (let y = 0; y < rh; y += step)
+      for (let x = 0; x < rw; x += step) {
+        const i = (y * rw + x) * 4
+        if (0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2] > 170) bright++
+      }
+    if (bright / total < 0.10) { timerRef.current = setTimeout(tryCapture, 1000); return }
+
+    busyRef.current = true
+    setPhase('reading')
+
+    try {
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.88)
+      const cropped = await cropToWhiteLabel(dataUrl)
+      const result  = await analyzeDocument(cropped, invRef.current, pesRef.current)
+
+      if (!result || (!result.customerName && !result.orderId && !result.cep && !result.location)) {
+        busyRef.current = false; setPhase('scanning')
+        timerRef.current = setTimeout(tryCapture, 2000); return
+      }
+
+      // Verifica duplicata: já na fila ou registrado hoje
+      const todayStr = new Date().toLocaleDateString('pt-BR')
+      const isDupTrans = transRef.current.some(t => {
+        if (t.type !== 'saída' || !t.date?.startsWith(todayStr)) return false
+        const loc = unpackLocation(t.itemName)
+        return (result.orderId && loc?.orderId === result.orderId) ||
+               (result.customerName && t.personName?.toLowerCase() === result.customerName?.trim().toLowerCase())
+      })
+      const isDupQueue = queueRef.current.some(q =>
+        (result.orderId && q.orderId === result.orderId) ||
+        (result.customerName && q.customerName?.toLowerCase() === result.customerName?.trim().toLowerCase())
+      )
+
+      const item = { ...result, _id: `${Date.now()}-${Math.random()}`, _isDup: isDupTrans || isDupQueue }
+      playBeep()
+      setFlash({ name: result.customerName || result.orderId || '✓', isDup: item._isDup })
+
+      setTimeout(() => {
+        setQueue(prev => [...prev, item])
+        setFlash(null)
+        busyRef.current = false
+        setPhase('scanning')
+        timerRef.current = setTimeout(tryCapture, 1400)
+      }, 1100)
+
+    } catch {
+      busyRef.current = false; setPhase('scanning')
+      timerRef.current = setTimeout(tryCapture, 2500)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (phase !== 'scanning') return
+    timerRef.current = setTimeout(tryCapture, 1800)
+    return () => clearTimeout(timerRef.current)
+  }, [phase, tryCapture])
+
+  const removeFromQueue = useCallback(id => setQueue(prev => prev.filter(q => q._id !== id)), [])
+
+  const toggleTorch = useCallback(async () => {
+    const track = streamRef.current?.getVideoTracks()[0]
+    if (!track) return
+    try { await track.applyConstraints({ advanced: [{ torch: !torch }] }); setTorch(v => !v) } catch {}
+  }, [torch])
+
+  const frameColor = phase === 'reading' ? '#fbbf24' : flash ? (flash.isDup ? '#f97316' : '#22c55e') : '#fff'
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 9999, background: '#000', display: 'flex', flexDirection: 'column' }}>
+
+      {/* ── Área de vídeo ── */}
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', minHeight: 0 }}>
+        <video ref={videoRef} playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+
+        {/* Overlay escuro */}
+        <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '28%', background: 'rgba(0,0,0,0.55)' }} />
+          <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: '28%', background: 'rgba(0,0,0,0.55)' }} />
+          <div style={{ position: 'absolute', top: '28%', left: 0, width: '4%', height: '44%', background: 'rgba(0,0,0,0.55)' }} />
+          <div style={{ position: 'absolute', top: '28%', right: 0, width: '4%', height: '44%', background: 'rgba(0,0,0,0.55)' }} />
+          {/* Moldura */}
+          <div style={{ position: 'absolute', top: '28%', left: '4%', right: '4%', height: '44%', border: `2.5px solid ${frameColor}`, borderRadius: 10, transition: 'border-color 0.2s' }} />
+          {/* Cantos */}
+          {[['28%','4%','top','left'],['28%','4%','top','right'],['28%','4%','bottom','left'],['28%','4%','bottom','right']].map(([t,l,v,h],i) => (
+            <div key={i} style={{ position: 'absolute', [v]: `calc(${v === 'top' ? '28%' : '28%'} - 2px)`, [h]: `calc(4% - 2px)`, width: 20, height: 20, [`border${v.charAt(0).toUpperCase()+v.slice(1)}`]: `4px solid ${frameColor}`, [`border${h.charAt(0).toUpperCase()+h.slice(1)}`]: `4px solid ${frameColor}`, borderRadius: v==='top'?(h==='left'?'6px 0 0 0':'0 6px 0 0'):(h==='left'?'0 0 0 6px':'0 0 6px 0'), transition: 'border-color 0.2s' }} />
+          ))}
+        </div>
+
+        {/* Flash de confirmação */}
+        {flash && (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: flash.isDup ? 'rgba(249,115,22,0.2)' : 'rgba(34,197,94,0.2)', pointerEvents: 'none' }}>
+            <div style={{ background: flash.isDup ? '#f97316' : '#22c55e', color: '#fff', padding: '0.7rem 1.4rem', borderRadius: 12, fontSize: '1rem', fontWeight: 800, boxShadow: '0 4px 20px rgba(0,0,0,0.3)', maxWidth: '80%', textAlign: 'center' }}>
+              {flash.isDup ? '⚠️ Duplicata — ' : '✅ '}{flash.name}
+            </div>
+          </div>
+        )}
+
+        {/* Indicador de leitura */}
+        {phase === 'reading' && (
+          <div style={{ position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)', background: 'rgba(0,0,0,0.75)', color: '#fbbf24', padding: '4px 14px', borderRadius: 99, fontSize: '0.78rem', fontWeight: 700 }}>
+            ⏳ Lendo...
+          </div>
+        )}
+
+        {/* Badge fila */}
+        {queue.length > 0 && (
+          <div style={{ position: 'absolute', top: 12, right: 12, background: '#2563eb', color: '#fff', borderRadius: 99, padding: '4px 13px', fontSize: '0.8rem', fontWeight: 800, boxShadow: '0 2px 8px rgba(0,0,0,0.3)' }}>
+            {queue.length} na fila
+          </div>
+        )}
+
+        {/* Instrução */}
+        {phase === 'error' ? (
+          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', color: '#ef4444', fontWeight: 700, textAlign: 'center', padding: '0 1rem' }}>
+            ❌ {errMsg || 'Câmera indisponível'}
+          </div>
+        ) : (
+          <div style={{ position: 'absolute', top: '75%', left: 0, right: 0, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+            <span style={{ background: 'rgba(0,0,0,0.6)', color: '#fff', fontSize: '0.73rem', fontWeight: 600, padding: '3px 12px', borderRadius: 99 }}>
+              {phase === 'reading' ? 'Processando...' : 'Encaixe a etiqueta na moldura'}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* ── Fila (últimos 3) ── */}
+      {queue.length > 0 && (
+        <div style={{ background: '#0f172a', borderTop: '1px solid #1e293b', maxHeight: 108, overflowY: 'auto' }}>
+          {[...queue].reverse().slice(0, 3).map(item => (
+            <div key={item._id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.38rem 1rem', borderBottom: '1px solid #1e293b', background: item._isDup ? 'rgba(249,115,22,0.07)' : 'transparent' }}>
+              <span style={{ fontSize: '0.68rem', flexShrink: 0 }}>{item._isDup ? '⚠️' : '✅'}</span>
+              <span style={{ fontSize: '0.78rem', color: '#e2e8f0', fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {item.customerName || item.orderId || '—'}
+              </span>
+              {item.location && <span style={{ fontSize: '0.67rem', color: '#475569', flexShrink: 0 }}>{item.location}</span>}
+              <button onClick={() => removeFromQueue(item._id)} style={{ background: 'none', border: 'none', color: '#475569', cursor: 'pointer', fontSize: '0.82rem', padding: '0 2px', flexShrink: 0, lineHeight: 1 }}>✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Barra de ações ── */}
+      <div style={{ background: '#0f172a', padding: '0.8rem 1rem 1.1rem', display: 'flex', gap: '0.55rem', alignItems: 'center' }}>
+        <button onClick={toggleTorch} style={{ padding: '0.45rem 0.85rem', borderRadius: 9, background: torch ? '#fef08a' : '#1e293b', color: torch ? '#78350f' : '#94a3b8', border: '1px solid #334155', fontWeight: 600, cursor: 'pointer', fontSize: '0.78rem', flexShrink: 0 }}>
+          {torch ? '🔦 ON' : '🔦'}
+        </button>
+        <button onClick={onClose} style={{ padding: '0.45rem 0.85rem', borderRadius: 9, background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', fontWeight: 600, cursor: 'pointer', fontSize: '0.78rem', flexShrink: 0 }}>
+          ✕ Fechar
+        </button>
+        {queue.length > 0 && (
+          <button
+            onClick={() => { onReviewQueue(queue); }}
+            style={{ marginLeft: 'auto', padding: '0.55rem 1.15rem', borderRadius: 9, background: 'linear-gradient(135deg,#1d4ed8,#2563eb)', color: '#fff', border: 'none', fontWeight: 800, cursor: 'pointer', fontSize: '0.85rem', boxShadow: '0 2px 10px rgba(37,99,235,0.45)', flexShrink: 0 }}
+          >
+            Revisar {queue.length} pedido{queue.length !== 1 ? 's' : ''} →
+          </button>
+        )}
+      </div>
+
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
+    </div>
+  )
+}
+
+// ─── Item individual na fila de revisão ──────────────────────────────────────
+function QueueItem({ item, inventory, onChange, onRemove }) {
+  const [search, setSearch] = useState('')
+  const [open,   setOpen]   = useState(false)
+  const selected = inventory.find(i => i.id === item.selectedProduct)
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return (q ? inventory.filter(i => i.name.toLowerCase().includes(q)) : inventory).slice(0, 10)
+  }, [inventory, search])
+
+  return (
+    <div style={{ background: '#fff', borderRadius: 12, padding: '0.85rem 1rem', border: `1.5px solid ${item._isDup && item.keep ? '#fed7aa' : '#e2e8f0'}`, opacity: item.keep ? 1 : 0.45, transition: 'opacity 0.15s' }}>
+      {/* Cabeçalho */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.55rem' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {item._isDup && <span style={{ background: '#fff7ed', color: '#f97316', fontSize: '0.65rem', fontWeight: 700, padding: '2px 7px', borderRadius: 99, border: '1px solid #fed7aa', marginRight: 5, whiteSpace: 'nowrap' }}>⚠️ Duplicata</span>}
+          <span style={{ fontWeight: 700, color: '#0f172a', fontSize: '0.88rem' }}>{item.customerName || '—'}</span>
+          {item.orderId && <span style={{ color: '#94a3b8', fontSize: '0.7rem', marginLeft: 6 }}>#{item.orderId.slice(0, 16)}</span>}
+          <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: 2 }}>
+            {[item.location, item.bairro, item.cep, item.rastreio ? `📦 ${item.rastreio}` : null].filter(Boolean).join(' · ')}
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0 }}>
+          {item._isDup && (
+            <button onClick={() => onChange({ keep: !item.keep })} style={{ padding: '2px 8px', borderRadius: 6, fontSize: '0.68rem', fontWeight: 700, cursor: 'pointer', background: item.keep ? '#fef3c7' : '#f0fdf4', color: item.keep ? '#d97706' : '#16a34a', border: `1px solid ${item.keep ? '#fde68a' : '#bbf7d0'}`, whiteSpace: 'nowrap' }}>
+              {item.keep ? 'Ignorar' : 'Incluir'}
+            </button>
+          )}
+          <button onClick={onRemove} style={{ background: 'none', border: 'none', color: '#cbd5e1', cursor: 'pointer', fontSize: '0.95rem', padding: '0 2px', lineHeight: 1 }}>✕</button>
+        </div>
+      </div>
+
+      {/* Seletor de produto + qtd */}
+      {item.keep && (
+        <div style={{ display: 'flex', gap: '0.45rem', alignItems: 'center' }}>
+          <div style={{ flex: 1, position: 'relative' }}>
+            {selected ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: '#f0fdf4', border: '1.5px solid #bbf7d0', borderRadius: 8, padding: '0.32rem 0.65rem' }}>
+                <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#16a34a', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>📦 {selected.name}</span>
+                <button onClick={() => { onChange({ selectedProduct: '' }); setSearch('') }} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '0.8rem', lineHeight: 1 }}>✕</button>
+              </div>
+            ) : (
+              <>
+                <input
+                  value={search} onChange={e => { setSearch(e.target.value); setOpen(true) }}
+                  onFocus={() => setOpen(true)}
+                  placeholder="🔍 Produto..."
+                  style={{ width: '100%', padding: '0.35rem 0.65rem', borderRadius: 8, border: '1.5px solid #e2e8f0', fontSize: '0.78rem', boxSizing: 'border-box', outline: 'none' }}
+                />
+                {open && (
+                  <div style={{ position: 'absolute', top: '105%', left: 0, right: 0, zIndex: 60, background: '#fff', borderRadius: 8, boxShadow: '0 6px 20px rgba(0,0,0,0.13)', border: '1px solid #e2e8f0', overflow: 'hidden', maxHeight: 170, overflowY: 'auto' }}>
+                    {filtered.map(inv => (
+                      <button key={inv.id} onClick={() => { onChange({ selectedProduct: inv.id }); setSearch(''); setOpen(false) }} style={{ width: '100%', padding: '0.42rem 0.75rem', border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left', fontSize: '0.78rem', color: '#1e293b', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.name}</span>
+                        <span style={{ color: '#94a3b8', fontSize: '0.68rem', flexShrink: 0 }}>{inv.quantity} un</span>
+                      </button>
+                    ))}
+                    {!filtered.length && <div style={{ padding: '0.5rem 0.75rem', color: '#94a3b8', fontSize: '0.78rem' }}>Nenhum produto</div>}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          <input
+            type="number" min="1" value={item.quantity}
+            onChange={e => onChange({ quantity: Math.max(1, Number(e.target.value) || 1) })}
+            style={{ width: 54, padding: '0.35rem 0.4rem', borderRadius: 8, border: '1.5px solid #e2e8f0', fontSize: '0.82rem', textAlign: 'center' }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Tela de revisão da fila ──────────────────────────────────────────────────
+function QueueReview({ queue, inventory, onConfirm, onBack }) {
+  const [items, setItems] = useState(() =>
+    queue.map(q => ({ ...q, selectedProduct: '', quantity: 1, keep: true }))
+  )
+
+  const update = useCallback((id, updates) => {
+    setItems(prev => prev.map(it => it._id === id ? { ...it, ...updates } : it))
+  }, [])
+
+  const remove = useCallback((id) => {
+    setItems(prev => prev.filter(it => it._id !== id))
+  }, [])
+
+  const valid = items.filter(it => it.keep && it.selectedProduct)
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 9998, background: '#f8fafc', display: 'flex', flexDirection: 'column' }}>
+
+      {/* Header */}
+      <div style={{ background: '#0f172a', padding: '0.8rem 1.1rem', display: 'flex', alignItems: 'center', gap: '0.75rem', flexShrink: 0 }}>
+        <button onClick={onBack} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '1.15rem', lineHeight: 1 }}>←</button>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: '0.92rem', fontWeight: 800, color: '#fff' }}>📋 Revisar Pedidos</div>
+          <div style={{ fontSize: '0.7rem', color: '#475569' }}>
+            {items.length} etiqueta{items.length !== 1 ? 's' : ''} · {valid.length} com produto selecionado
+          </div>
+        </div>
+        {valid.length > 0 && (
+          <button
+            onClick={() => onConfirm(items.filter(it => it.keep && it.selectedProduct))}
+            style={{ padding: '0.5rem 1.1rem', borderRadius: 9, background: '#22c55e', color: '#fff', border: 'none', fontWeight: 800, cursor: 'pointer', fontSize: '0.83rem', boxShadow: '0 2px 8px rgba(34,197,94,0.35)', whiteSpace: 'nowrap' }}
+          >
+            ✅ Confirmar {valid.length}
+          </button>
+        )}
+      </div>
+
+      {/* Lista */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '0.75rem 0.85rem', display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
+        {items.length === 0 && (
+          <div style={{ textAlign: 'center', color: '#94a3b8', marginTop: '3rem' }}>
+            <div style={{ fontSize: '2rem' }}>📭</div>
+            <div style={{ marginTop: '0.5rem', fontSize: '0.88rem' }}>Fila vazia</div>
+          </div>
+        )}
+        {items.map(item => (
+          <QueueItem
+            key={item._id}
+            item={item}
+            inventory={inventory}
+            onChange={updates => update(item._id, updates)}
+            onRemove={() => remove(item._id)}
+          />
+        ))}
+      </div>
+
+      {/* Footer */}
+      {valid.length > 0 && (
+        <div style={{ background: '#fff', borderTop: '1px solid #e2e8f0', padding: '0.85rem 1rem', flexShrink: 0 }}>
+          <button
+            onClick={() => onConfirm(items.filter(it => it.keep && it.selectedProduct))}
+            style={{ width: '100%', padding: '0.7rem', borderRadius: 10, background: 'linear-gradient(135deg,#16a34a,#22c55e)', color: '#fff', border: 'none', fontWeight: 800, cursor: 'pointer', fontSize: '0.92rem', boxShadow: '0 3px 12px rgba(34,197,94,0.3)' }}
+          >
+            ✅ Registrar {valid.length} pedido{valid.length !== 1 ? 's' : ''}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function parseDate(str) {
@@ -169,6 +604,25 @@ function OrderRow({ tx, status, expanded, onExpand, onStatusChange, onViewMap, o
   const city     = loc?.city || tx.city || '—'
   const rastreio = loc?.rastreio || null
   const date     = tx.date?.split(' ')[0] || '—'
+  const [copied, setCopied] = useState(false)
+
+  // Dias em envio
+  const daysInStatus = useMemo(() => {
+    if (status !== 'em_envio' || !tx.date) return null
+    const parts = tx.date.split(' ')[0].split('/')
+    if (parts.length < 3) return null
+    const txDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`)
+    const diff   = Math.floor((Date.now() - txDate.getTime()) / 86_400_000)
+    return diff
+  }, [status, tx.date])
+
+  const copyRastreio = useCallback((e) => {
+    e.stopPropagation()
+    if (!rastreio) return
+    navigator.clipboard.writeText(rastreio).then(() => {
+      setCopied(true); setTimeout(() => setCopied(false), 1800)
+    }).catch(() => {})
+  }, [rastreio])
 
   return (
     <>
@@ -204,10 +658,27 @@ function OrderRow({ tx, status, expanded, onExpand, onStatusChange, onViewMap, o
         <td style={{ padding: '0.7rem 0.75rem', fontSize: '0.78rem', textAlign: 'center' }}>{tx.quantity}</td>
         <td style={{ padding: '0.7rem 0.75rem', fontSize: '0.82rem', fontWeight: 700, color: '#16a34a', whiteSpace: 'nowrap' }}>{formatCurrency(tx.totalValue)}</td>
         <td style={{ padding: '0.7rem 0.75rem' }} onClick={e => e.stopPropagation()}>
-          <StatusBadge status={status} onChange={onStatusChange} compact />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'flex-start' }}>
+            <StatusBadge status={status} onChange={onStatusChange} compact />
+            {daysInStatus !== null && (
+              <span style={{ fontSize: '0.62rem', fontWeight: 700, color: daysInStatus > 5 ? '#dc2626' : daysInStatus > 2 ? '#d97706' : '#64748b', whiteSpace: 'nowrap' }}>
+                {daysInStatus === 0 ? 'hoje' : `há ${daysInStatus}d`}
+              </span>
+            )}
+          </div>
         </td>
-        <td style={{ padding: '0.7rem 0.75rem', fontSize: '0.7rem', color: rastreio ? '#2563eb' : '#cbd5e1', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {rastreio ? `📦 ${rastreio}` : '—'}
+        <td style={{ padding: '0.7rem 0.75rem', maxWidth: 135 }} onClick={e => e.stopPropagation()}>
+          {rastreio ? (
+            <button
+              onClick={copyRastreio}
+              title="Clique para copiar"
+              style={{ background: copied ? '#f0fdf4' : '#eff6ff', border: `1px solid ${copied ? '#bbf7d0' : '#bfdbfe'}`, borderRadius: 6, padding: '2px 7px', cursor: 'pointer', fontSize: '0.68rem', color: copied ? '#16a34a' : '#2563eb', fontWeight: 700, maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', transition: 'all 0.15s' }}
+            >
+              {copied ? '✅ Copiado!' : `📦 ${rastreio}`}
+            </button>
+          ) : (
+            <span style={{ color: '#cbd5e1', fontSize: '0.7rem' }}>—</span>
+          )}
         </td>
         <td style={{ padding: '0.7rem 0.75rem' }} onClick={e => e.stopPropagation()}>
           <div style={{ display: 'flex', gap: 3, flexWrap: 'nowrap' }}>
@@ -309,7 +780,11 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
   // ── Tabs ──
   const [pageTab, setPageTab] = useState('central')
 
-  // ── Form state (preservado intacto) ──
+  // ── Camera / fila ──
+  const [showCamera,     setShowCamera]     = useState(false)
+  const [showReview,     setShowReview]     = useState(false)
+  const [pendingQueue,   setPendingQueue]   = useState([])
+  // ── Form state ──
   const [showLabel,      setShowLabel]      = useState(false)
   const [dragOver,       setDragOver]       = useState(false)
   const [dragProcessing, setDragProcessing] = useState(false)
@@ -428,6 +903,54 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
     addToast(`${ids.length} pedido${ids.length > 1 ? 's' : ''} excluído${ids.length > 1 ? 's' : ''}.`, 'info')
   }, [selectedIds, setTransactions, addToast])
 
+  // ── Processa fila do scanner em lote ──────────────────────────────────────
+  const processQueue = useCallback(async (items) => {
+    let ok = 0, fail = 0
+    for (const item of items) {
+      try {
+        const inv = inventory.find(i => i.id === item.selectedProduct)
+        if (!inv) { fail++; continue }
+        const qty = Number(item.quantity) || 1
+        if (Number(inv.quantity) < qty) {
+          addToast(`Estoque insuficiente: ${inv.name}`, 'warning'); fail++; continue
+        }
+        let pessoa = pessoas.find(p => p.name.toLowerCase() === item.customerName?.toLowerCase())
+        if (!pessoa && item.customerName) {
+          pessoa = { id: generateId(), name: item.customerName.trim(), document: '', role: 'cliente', contact: '' }
+          if (setPessoas) setPessoas(prev => [...prev, pessoa])
+          await supabase.from('pessoas').insert([pessoa])
+        }
+        const geo  = await geocode(item.location || item.cep || '')
+        const city = geo?.city || item.location || ''
+        const packedName = packLocation(inv.name, {
+          city, lat: geo?.lat, lng: geo?.lng,
+          orderId: item.orderId || '', cep: item.cep || '',
+          address: item.address || '', bairro: item.bairro || '',
+          rastreio: item.rastreio || '', modalidade: item.modalidade || '',
+        })
+        const newQty = Number(inv.quantity) - qty
+        const tx = {
+          id: generateId(), type: 'saída', itemId: inv.id, itemName: packedName, city,
+          quantity: qty, unitPrice: inv.price, totalValue: inv.price * qty,
+          personName: pessoa?.name || item.customerName || 'Desconhecido', date: formatDate(),
+        }
+        await Promise.all([
+          supabase.from('inventory').update({ quantity: newQty }).eq('id', inv.id),
+          supabase.from('transactions').insert([tx]),
+        ])
+        supabase.from('transactions').update({ status: 'pendente' }).eq('id', tx.id).then(() => {})
+        setInventory(prev => prev.map(i => i.id === inv.id ? { ...i, quantity: newQty } : i))
+        setTransactions(prev => [...prev, tx])
+        ok++
+      } catch (err) {
+        addToast(`Erro: ${err.message}`, 'error'); fail++
+      }
+    }
+    if (ok > 0) addToast(`✅ ${ok} pedido${ok !== 1 ? 's' : ''} registrado${ok !== 1 ? 's' : ''}${fail > 0 ? ` · ${fail} com erro` : ''}!`, 'success')
+    setShowReview(false); setPendingQueue([])
+    if (ok > 0) setPageTab('central')
+  }, [inventory, pessoas, setPessoas, setInventory, setTransactions, addToast])
+
   // ── Handlers do formulário (preservados intactos) ──
   const filteredProducts = useMemo(() => {
     const tokens = normalizeText(productSearch).split(/\s+/).filter(Boolean)
@@ -498,12 +1021,11 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
         reader.onerror = rej
         reader.readAsDataURL(file)
       })
-      const { data: { text } } = await Tesseract.recognize(dataUrl, 'por')
-      let result = await analyzeText(text, inventory, pessoas)
-      if (!result || (!result.customerName && !result.location)) {
-        const b64 = dataUrl.split(',')[1]
-        result = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
-      }
+
+      // Recorta etiqueta + Vision direto
+      const cropped = await cropToWhiteLabel(dataUrl)
+      const result  = await analyzeDocument(cropped, inventory, pessoas)
+
       if (result && (result.customerName || result.location || result.rastreio || result.orderId)) {
         const q = result.customerName || result.rastreio || result.orderId || result.location || ''
         setSearch(q)
@@ -529,7 +1051,7 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
       return
     }
     setDragProcessing(true)
-    addToast('🔍 Lendo imagem...', 'info')
+    addToast('🔍 Lendo etiqueta...', 'info')
     try {
       const dataUrl = await new Promise((res, rej) => {
         const reader = new FileReader()
@@ -537,18 +1059,18 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
         reader.onerror = rej
         reader.readAsDataURL(file)
       })
-      const { data: { text } } = await Tesseract.recognize(dataUrl, 'por')
-      let result = await analyzeText(text, inventory, pessoas)
-      if (!result || (!result.customerName && !result.location)) {
-        addToast('Refinando com IA visual...', 'info')
-        const b64 = dataUrl.split(',')[1]
-        result = await analyzeDocument(`data:image/jpeg;base64,${b64}`, inventory, pessoas)
-      }
-      if (result && (result.customerName || result.location)) {
+
+      // Recorta automaticamente a etiqueta (remove fundo de papelão/mesa)
+      const cropped = await cropToWhiteLabel(dataUrl)
+
+      // Vision direto — muito mais preciso que OCR para fotos de etiqueta
+      const result = await analyzeDocument(cropped, inventory, pessoas)
+
+      if (result && (result.customerName || result.location || result.cep || result.orderId)) {
         await handleLabelData(result)
-        addToast('✅ Dados extraídos da imagem!', 'success')
+        addToast('✅ Dados extraídos!', 'success')
       } else {
-        addToast('Não foi possível extrair dados. Tente outra imagem.', 'warning')
+        addToast('Não foi possível extrair dados. Tente uma foto mais próxima da etiqueta.', 'warning')
       }
     } catch (err) {
       addToast(`Erro ao processar imagem: ${err.message}`, 'error')
@@ -572,510 +1094,4 @@ export function OrdersManager({ inventory, setInventory, pessoas, setPessoas, tr
         pessoa = { id: generateId(), name: selectedPessoa.trim(), document: '', role: 'cliente', contact: '' }
         if (setPessoas) setPessoas(prev => [...prev, pessoa])
         await supabase.from('pessoas').insert([pessoa])
-        addToast(`Novo cliente "${pessoa.name}" cadastrado!`, 'success')
-      }
-      const geo = await geocode(location)
-      const city = geo?.city || location.split('-')[0].split(',')[0].trim()
-      const packedName = packLocation(item.name, {
-        city, lat: geo?.lat, lng: geo?.lng, orderId: orderRef, cep: '',
-        address, bairro, rastreio, modalidade,
-      })
-      const newQty = Number(item.quantity) - Number(quantity)
-      const tx = {
-        id: generateId(), type: 'saída', itemId: item.id, itemName: packedName, city,
-        quantity: Number(quantity), unitPrice: item.price,
-        totalValue: item.price * Number(quantity),
-        personName: pessoa.name, date: formatDate(),
-      }
-      const [{ error: e1 }, { error: e2 }] = await Promise.all([
-        supabase.from('inventory').update({ quantity: newQty }).eq('id', item.id),
-        supabase.from('transactions').insert([tx]),
-      ])
-      if (e1 || e2) throw new Error(`Erro ao salvar no banco. inventory: ${e1?.message || 'ok'} | transaction: ${e2?.message || 'ok'}`)
-      // Tenta salvar status separadamente (coluna pode não existir ainda)
-      supabase.from('transactions').update({ status: 'pendente' }).eq('id', tx.id).then(() => {})
-      setInventory(prev => prev.map(i => i.id === item.id ? { ...i, quantity: newQty } : i))
-      setTransactions(prev => [...prev, tx])
-      addToast(`✅ Pedido de ${quantity}x "${item.name}" registrado!`, 'success')
-      setProductSearch(''); setSelectedItem(''); setSelectedPessoa('')
-      setQuantity(1); setLocation(''); setAddress(''); setBairro('')
-      setOrderRef(''); setRastreio(''); setModalidade('')
-      setPageTab('central')
-    } catch (err) {
-      addToast(`Erro: ${err.message}`, 'error')
-    } finally {
-      setProcessing(false)
-    }
-  }, [selectedItem, selectedPessoa, quantity, location, address, bairro, orderRef, rastreio, modalidade, inventory, pessoas, setPessoas, setInventory, setTransactions, addToast])
-
-  const sharedProps = { inventory, setInventory, transactions, setTransactions, pessoas, setPessoas, addToast }
-
-  // ── Render ────────────────────────────────────────────────────────────────────
-  return (
-    <div className="page" style={{ maxWidth: 1300, margin: '0 auto', background: '#f8fafc', minHeight: '100vh' }}>
-
-      {/* ══ HEADER ══════════════════════════════════════════════════════════════ */}
-      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: '1.3rem', flexWrap: 'wrap', gap: '0.75rem' }}>
-        <div>
-          <h1 style={{ fontSize: '1.45rem', fontWeight: 800, color: '#0f172a', margin: 0, letterSpacing: '-0.3px' }}>
-            🛒 Central de Pedidos
-          </h1>
-          <p style={{ color: '#94a3b8', fontSize: '0.78rem', margin: '0.15rem 0 0' }}>
-            {sales.length} pedido{sales.length !== 1 ? 's' : ''} no total · {new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}
-          </p>
-        </div>
-        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-          {[['central', '📊 Central'], ['form', '➕ Novo Pedido'], ['batch', '📷 Scanner']].map(([v, l]) => (
-            <button
-              key={v} onClick={() => setPageTab(v)}
-              style={{
-                padding: '0.42rem 0.9rem', borderRadius: 9, border: 'none',
-                background: pageTab === v ? '#2563eb' : '#fff',
-                color: pageTab === v ? '#fff' : '#374151',
-                fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer',
-                boxShadow: pageTab === v ? '0 2px 8px rgba(37,99,235,0.3)' : '0 1px 3px rgba(0,0,0,0.08)',
-                transition: 'all 0.15s',
-              }}
-            >{l}</button>
-          ))}
-        </div>
-      </div>
-
-      {/* ══ TAB: SCANNER ════════════════════════════════════════════════════════ */}
-      {pageTab === 'batch' && <BatchScanner {...sharedProps} />}
-
-      {/* ══ TAB: FORMULÁRIO ══════════════════════════════════════════════════════ */}
-      {pageTab === 'form' && (
-        <div className="card" style={{ maxWidth: 680 }}>
-
-          {/* ── Zona de Drag & Drop — topo do card ── */}
-          <div
-            onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={handleDrop}
-            style={{
-              border: `2px dashed ${dragOver ? '#2563eb' : dragProcessing ? '#7c3aed' : '#cbd5e1'}`,
-              borderRadius: 10,
-              padding: '0.9rem 1rem',
-              marginBottom: '0.75rem',
-              background: dragOver ? '#eff6ff' : dragProcessing ? '#faf5ff' : '#f8fafc',
-              display: 'flex', alignItems: 'center', gap: '0.75rem',
-              transition: 'all 0.18s',
-              cursor: 'default',
-            }}
-          >
-            <span style={{ fontSize: '1.8rem', lineHeight: 1, flexShrink: 0 }}>
-              {dragProcessing ? '⏳' : dragOver ? '📂' : '🖼️'}
-            </span>
-            <div>
-              <p style={{ margin: 0, fontSize: '0.85rem', fontWeight: 700, color: dragOver ? '#2563eb' : dragProcessing ? '#7c3aed' : '#374151' }}>
-                {dragProcessing ? 'Lendo imagem...' : dragOver ? 'Solte para preencher o formulário' : 'Arraste a foto da etiqueta aqui'}
-              </p>
-              <p style={{ margin: 0, fontSize: '0.73rem', color: '#94a3b8', marginTop: 2 }}>
-                Preenche cliente, CEP, endereço e rastreio automaticamente
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button" className="btn btn-secondary"
-            style={{ width: '100%', marginBottom: showLabel ? '0.75rem' : 0, justifyContent: 'center', gap: '0.5rem' }}
-            onClick={() => setShowLabel(v => !v)}
-          >
-            {showLabel ? '▲' : '▼'} 🤖 Ler Etiqueta / Foto de Pedido
-          </button>
-          {showLabel && (
-            <>
-              <LabelAssistant inventory={inventory} pessoas={pessoas} addToast={addToast} onDataExtracted={handleLabelData} />
-              <hr className="divider" />
-            </>
-          )}
-
-          <form onSubmit={handleOrder} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div className="form-group">
-              <label>Produto</label>
-              <input type="text" placeholder="🔍 Buscar produto..." value={productSearch} onChange={e => setProductSearch(e.target.value)} style={{ marginBottom: '0.4rem' }} />
-              <select value={selectedItem} onChange={e => setSelectedItem(e.target.value)} required style={{ borderColor: productSearch ? 'var(--border-focus)' : undefined }}>
-                <option value="">{filteredProducts.length ? 'Selecione o produto...' : 'Nenhum produto encontrado'}</option>
-                {filteredProducts.map(i => (
-                  <option key={i.id} value={i.id} disabled={i.quantity <= 0}>
-                    {i.name} ({i.quantity} un.) — R$ {Number(i.price).toFixed(2)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label>Cliente</label>
-              <input type="text" list="pessoas-list" placeholder="Nome do cliente..." value={selectedPessoa} onChange={e => setSelectedPessoa(e.target.value)} required />
-              <datalist id="pessoas-list">{pessoas.map(p => <option key={p.id} value={p.name} />)}</datalist>
-            </div>
-
-            <div className="form-row">
-              <div className="form-group" style={{ maxWidth: 120 }}>
-                <label>Quantidade</label>
-                <input type="number" value={quantity} onChange={e => setQuantity(e.target.value)} min="1" required />
-              </div>
-              <div className="form-group">
-                <label>Referência / Pedido</label>
-                <input type="text" placeholder="Ex: #12345 ou NF: 999" value={orderRef} onChange={e => setOrderRef(e.target.value)} />
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label>Destino (Cidade ou CEP) *</label>
-                <input type="text" placeholder="Ex: São Paulo ou 01310-000" value={location} onChange={e => setLocation(e.target.value)} required />
-              </div>
-              <div className="form-group">
-                <label>Endereço Completo</label>
-                <input type="text" placeholder="Rua, Número" value={address} onChange={e => setAddress(e.target.value)} />
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label>Bairro</label>
-                <input type="text" value={bairro} onChange={e => setBairro(e.target.value)} placeholder="Ex: Centro" />
-              </div>
-              <div className="form-group">
-                <label>Rastreio</label>
-                <input type="text" value={rastreio} onChange={e => setRastreio(e.target.value)} placeholder="BR0000000000000" />
-              </div>
-              <div className="form-group">
-                <label>Modalidade</label>
-                <select value={modalidade} onChange={e => setModalidade(e.target.value)}>
-                  <option value="">Selecione...</option>
-                  {['COLETA','PAC','SEDEX','SEDEX 10','JADLOG','CORREIOS','TRANSPORTADORA','RETIRADA'].map(m => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <button type="submit" className="btn btn-primary btn-lg btn-full" disabled={processing}>
-              {processing ? '⏳ Processando...' : '🔥 Finalizar Pedido e Marcar no Mapa'}
-            </button>
-          </form>
-        </div>
-      )}
-
-      {/* ══ TAB: CENTRAL ════════════════════════════════════════════════════════ */}
-      {pageTab === 'central' && (
-        <>
-          {/* ── KPI Summary Cards ── */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(165px, 1fr))', gap: '0.85rem', marginBottom: '1.2rem' }}>
-            <SummaryCard
-              icon="📅" label="Hoje" value={todayCount}
-              color="#2563eb" bg="#eff6ff" border="#bfdbfe"
-              active={filterPeriod === 'today'}
-              onClick={() => setFilterPeriod(p => p === 'today' ? 'all' : 'today')}
-              sub={`de ${sales.length} total`}
-            />
-            <SummaryCard
-              icon="🚚" label="Em Envio" value={emEnvioCount}
-              color="#d97706" bg="#fef3c7" border="#fde68a"
-              active={filterStatus === 'em_envio'}
-              onClick={() => setFilterStatus(s => s === 'em_envio' ? 'all' : 'em_envio')}
-              sub="clique para filtrar"
-            />
-            <SummaryCard
-              icon="✅" label="Finalizados" value={finalizCount}
-              color="#16a34a" bg="#dcfce7" border="#bbf7d0"
-              active={filterStatus === 'finalizado'}
-              onClick={() => setFilterStatus(s => s === 'finalizado' ? 'all' : 'finalizado')}
-              sub="clique para filtrar"
-            />
-            <SummaryCard
-              icon="⚠️" label="Problemas" value={problemaCount}
-              color="#dc2626" bg="#fee2e2" border="#fecaca"
-              active={filterStatus === 'problema'}
-              onClick={() => setFilterStatus(s => s === 'problema' ? 'all' : 'problema')}
-              sub={problemaCount > 0 ? 'requer atenção!' : 'tudo certo'}
-            />
-          </div>
-
-          {/* ── Zona de Drag & Drop para filtrar ── */}
-          <div
-            onDragOver={e => { e.preventDefault(); setCentralDrag(true) }}
-            onDragLeave={() => setCentralDrag(false)}
-            onDrop={handleCentralDrop}
-            style={{
-              border: `2px dashed ${centralDrag ? '#2563eb' : centralResult ? '#16a34a' : '#cbd5e1'}`,
-              borderRadius: 12,
-              padding: '0.75rem 1.1rem',
-              marginBottom: '0.85rem',
-              background: centralDrag ? '#eff6ff' : centralBusy ? '#f8fafc' : centralResult ? '#f0fdf4' : '#fff',
-              display: 'flex', alignItems: 'center', gap: '0.85rem',
-              transition: 'all 0.18s',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-            }}
-          >
-            <span style={{ fontSize: '1.5rem', lineHeight: 1, flexShrink: 0 }}>
-              {centralBusy ? '⏳' : centralDrag ? '📂' : centralResult ? '✅' : '🖼️'}
-            </span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <p style={{ margin: 0, fontSize: '0.82rem', fontWeight: 600, color: centralDrag ? '#2563eb' : centralResult ? '#16a34a' : '#475569' }}>
-                {centralBusy
-                  ? 'Lendo imagem...'
-                  : centralDrag
-                  ? 'Solte para filtrar pedidos'
-                  : centralResult
-                  ? `Filtrado por: "${centralResult.customerName || centralResult.rastreio || centralResult.orderId || centralResult.location}"`
-                  : 'Arraste uma foto de etiqueta para filtrar os pedidos'}
-              </p>
-              <p style={{ margin: 0, fontSize: '0.72rem', color: '#94a3b8' }}>
-                {centralResult ? 'Arraste outra imagem para nova busca' : 'Extrai cliente, rastreio ou pedido automaticamente'}
-              </p>
-            </div>
-            {centralResult && (
-              <button
-                onClick={() => { setCentralResult(null); setSearch('') }}
-                style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '1rem', padding: '2px 4px', flexShrink: 0 }}
-              >✕</button>
-            )}
-          </div>
-
-          {/* ── Search + Filters ── */}
-          <div style={{
-            background: '#fff', borderRadius: 14, padding: '0.8rem 1rem',
-            marginBottom: '0.85rem', boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
-            display: 'flex', gap: '0.55rem', flexWrap: 'wrap', alignItems: 'center',
-          }}>
-            {/* Busca global */}
-            <div style={{ position: 'relative', flex: '1 1 230px', minWidth: 190 }}>
-              <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', pointerEvents: 'none', fontSize: '0.85rem' }}>🔍</span>
-              <input
-                value={search} onChange={e => setSearch(e.target.value)}
-                placeholder="Buscar cliente, produto, cidade, rastreio..."
-                style={{
-                  width: '100%', background: '#f8fafc', border: '1.5px solid #e2e8f0',
-                  borderRadius: 8, padding: '0.42rem 0.7rem 0.42rem 32px', fontSize: '0.79rem',
-                  outline: 'none', boxSizing: 'border-box',
-                  borderColor: search ? '#2563eb' : '#e2e8f0',
-                }}
-              />
-              {search && (
-                <button onClick={() => setSearch('')} style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '0.85rem', padding: 0 }}>✕</button>
-              )}
-            </div>
-
-            {/* Período pills */}
-            <div style={{ display: 'flex', gap: '0.18rem', background: '#f1f5f9', borderRadius: 8, padding: '0.18rem', flexShrink: 0 }}>
-              {[['today','Hoje'],['week','7d'],['month','30d'],['all','Tudo']].map(([v, l]) => (
-                <button key={v} onClick={() => setFilterPeriod(v)} style={{
-                  padding: '0.25rem 0.55rem', border: 'none', borderRadius: 6,
-                  fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer',
-                  background: filterPeriod === v ? '#2563eb' : 'transparent',
-                  color: filterPeriod === v ? '#fff' : '#64748b', transition: 'all 0.12s',
-                }}>{l}</button>
-              ))}
-            </div>
-
-            <div style={{ width: 1, height: 24, background: '#e2e8f0', flexShrink: 0 }} />
-
-            {/* Status */}
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={selStyle(filterStatus !== 'all')}>
-              <option value="all">📊 Status</option>
-              {Object.entries(STATUS_CFG).map(([k, v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
-            </select>
-
-            {/* Cidade */}
-            <select value={filterCity} onChange={e => setFilterCity(e.target.value)} style={selStyle(filterCity !== 'all')}>
-              <option value="all">📍 Cidade</option>
-              {cities.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-
-            {/* Produto */}
-            <select value={filterProduct} onChange={e => setFilterProduct(e.target.value)} style={selStyle(filterProduct !== 'all')}>
-              <option value="all">📦 Produto</option>
-              {products.map(p => <option key={p} value={p}>{p}</option>)}
-            </select>
-
-            {/* Lote + Limpar */}
-            <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
-              <button
-                onClick={() => { setBatchMode(v => !v); setSelectedIds(new Set()) }}
-                style={{
-                  padding: '0.38rem 0.75rem', borderRadius: 8, fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer',
-                  border: `1.5px solid ${batchMode ? '#7c3aed' : '#e2e8f0'}`,
-                  background: batchMode ? '#ede9fe' : '#f8fafc',
-                  color: batchMode ? '#7c3aed' : '#64748b',
-                }}
-              >
-                {batchMode ? '✗ Sair Lote' : '☑️ Modo Lote'}
-              </button>
-              {hasFilters && (
-                <button
-                  onClick={() => { setSearch(''); setFilterStatus('all'); setFilterCity('all'); setFilterProduct('all'); setFilterPeriod('all') }}
-                  style={{ padding: '0.38rem 0.65rem', borderRadius: 8, border: '1px solid #fca5a5', background: '#fff', color: '#dc2626', fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer' }}
-                >✕ Limpar</button>
-              )}
-            </div>
-          </div>
-
-          {/* ── Barra de ações em lote ── */}
-          {batchMode && selectedIds.size > 0 && (
-            <div style={{
-              background: 'linear-gradient(135deg,#ede9fe,#ddd6fe)', border: '1px solid #c4b5fd',
-              borderRadius: 12, padding: '0.65rem 1rem', marginBottom: '0.75rem',
-              display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap',
-            }}>
-              <span style={{ fontWeight: 800, color: '#7c3aed', fontSize: '0.82rem' }}>
-                ☑️ {selectedIds.size} selecionado{selectedIds.size > 1 ? 's' : ''}
-              </span>
-              <div style={{ width: 1, height: 20, background: '#c4b5fd', flexShrink: 0 }} />
-              <button onClick={() => handleBatchStatus('em_envio')}  style={batchBtnStyle('#fef3c7','#d97706','#fde68a')}>🚚 Em Envio</button>
-              <button onClick={() => handleBatchStatus('finalizado')} style={batchBtnStyle('#dcfce7','#16a34a','#bbf7d0')}>✅ Finalizar</button>
-              <button onClick={() => handleBatchStatus('problema')}   style={batchBtnStyle('#fee2e2','#dc2626','#fecaca')}>⚠️ Problema</button>
-              <button onClick={() => handleBatchStatus('pendente')}   style={batchBtnStyle('#eff6ff','#2563eb','#bfdbfe')}>🕐 Pendente</button>
-              <button onClick={handleBatchDelete} style={{ ...batchBtnStyle('#fee2e2','#dc2626','#fecaca'), marginLeft: 'auto' }}>🗑️ Excluir</button>
-            </div>
-          )}
-
-          {/* ── Tabela de Pedidos ── */}
-          <div style={{ background: '#fff', borderRadius: 16, boxShadow: '0 1px 3px rgba(0,0,0,0.06)', overflow: 'hidden', marginBottom: '0.85rem' }}>
-
-            {/* Cabeçalho da tabela */}
-            <div style={{
-              padding: '0.8rem 1.2rem', borderBottom: '1px solid #f1f5f9',
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap',
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <span style={{ fontSize: '0.72rem', fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                  Pedidos
-                </span>
-                <span style={{
-                  background: hasFilters ? '#eff6ff' : '#f1f5f9',
-                  color: hasFilters ? '#2563eb' : '#64748b',
-                  borderRadius: 99, padding: '1px 9px', fontSize: '0.72rem', fontWeight: 700,
-                }}>
-                  {filteredSales.length}{hasFilters ? ` / ${sales.length}` : ''}
-                </span>
-              </div>
-              <button
-                onClick={() => setShowMap(v => !v)}
-                style={{
-                  padding: '0.32rem 0.8rem', borderRadius: 8, fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer',
-                  border: `1.5px solid ${showMap ? '#bfdbfe' : '#e2e8f0'}`,
-                  background: showMap ? '#eff6ff' : '#f8fafc',
-                  color: showMap ? '#2563eb' : '#64748b',
-                }}
-              >
-                🗺️ {showMap ? 'Ocultar Mapa' : 'Ver Mapa'}
-              </button>
-            </div>
-
-            {filteredSales.length === 0 ? (
-              <div style={{ padding: '3.5rem 1rem', textAlign: 'center', color: '#94a3b8' }}>
-                <div style={{ fontSize: '2.8rem', marginBottom: '0.6rem' }}>📭</div>
-                <div style={{ fontSize: '0.9rem', fontWeight: 700, color: '#64748b' }}>
-                  {sales.length === 0 ? 'Nenhum pedido registrado ainda' : 'Nenhum pedido encontrado com esses filtros'}
-                </div>
-                {hasFilters && (
-                  <button
-                    onClick={() => { setSearch(''); setFilterStatus('all'); setFilterCity('all'); setFilterProduct('all'); setFilterPeriod('all') }}
-                    style={{ marginTop: '0.75rem', padding: '0.4rem 1rem', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', cursor: 'pointer', fontSize: '0.78rem', color: '#2563eb', fontWeight: 600 }}
-                  >
-                    Limpar filtros
-                  </button>
-                )}
-                {sales.length === 0 && (
-                  <button
-                    onClick={() => setPageTab('form')}
-                    style={{ marginTop: '0.75rem', padding: '0.5rem 1.25rem', borderRadius: 8, border: 'none', background: '#2563eb', cursor: 'pointer', fontSize: '0.8rem', color: '#fff', fontWeight: 700 }}
-                  >
-                    ➕ Registrar Primeiro Pedido
-                  </button>
-                )}
-              </div>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 800 }}>
-                  <thead>
-                    <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
-                      {batchMode && (
-                        <th style={{ width: 38, padding: '0.65rem 0.5rem', textAlign: 'center' }}>
-                          <input
-                            type="checkbox"
-                            onChange={e => setSelectedIds(e.target.checked ? new Set(filteredSales.map(t => t.id)) : new Set())}
-                            checked={selectedIds.size > 0 && selectedIds.size === filteredSales.length}
-                            style={{ cursor: 'pointer', accentColor: '#7c3aed' }}
-                          />
-                        </th>
-                      )}
-                      {['Data','Cliente','Produto','Cidade','Qtd','Total','Status','Rastreio','Ações'].map(h => (
-                        <th key={h} style={{
-                          padding: '0.65rem 0.75rem', textAlign: 'left',
-                          fontSize: '0.67rem', fontWeight: 800, color: '#94a3b8',
-                          textTransform: 'uppercase', letterSpacing: '0.5px', whiteSpace: 'nowrap',
-                        }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredSales.map(t => (
-                      <OrderRow
-                        key={t.id}
-                        tx={t}
-                        status={getStatus(t)}
-                        expanded={expandedId === t.id}
-                        onExpand={id => setExpandedId(v => v === id ? null : id)}
-                        onStatusChange={s => updateStatus(t.id, s)}
-                        onViewMap={tx => { setFocusTx(tx); setShowMap(true) }}
-                        onDelete={deleteTransaction}
-                        selected={selectedIds.has(t.id)}
-                        onSelect={(id, checked) => setSelectedIds(prev => {
-                          const next = new Set(prev)
-                          checked ? next.add(id) : next.delete(id)
-                          return next
-                        })}
-                        batchMode={batchMode}
-                      />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {/* Mapa retrátil */}
-            {showMap && (
-              <div style={{ borderTop: '1px solid #f1f5f9' }}>
-                <div style={{ padding: '0.6rem 1.2rem', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b' }}>
-                    🗺️ Mapa de Pedidos {focusTx ? `— focado em ${focusTx.personName}` : `— ${sales.filter(t => unpackLocation(t.itemName)?.lat).length} pontos`}
-                  </span>
-                  {focusTx && (
-                    <button onClick={() => setFocusTx(null)} style={{ fontSize: '0.7rem', padding: '2px 8px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', cursor: 'pointer', color: '#64748b' }}>
-                      ✕ Resetar foco
-                    </button>
-                  )}
-                </div>
-                <OrdersMap transactions={transactions} focusTx={focusTx} />
-              </div>
-            )}
-          </div>
-
-        </>
-      )}
-    </div>
-  )
-}
-
-// ─── Estilos utilitários ──────────────────────────────────────────────────────
-function selStyle(active) {
-  return {
-    fontSize: '0.78rem', padding: '0.38rem 0.65rem', borderRadius: 8, cursor: 'pointer',
-    border: `1.5px solid ${active ? '#2563eb' : '#e2e8f0'}`,
-    background: active ? '#eff6ff' : '#f8fafc',
-    color: active ? '#2563eb' : '#374151',
-    fontWeight: active ? 700 : 400, outline: 'none',
-  }
-}
-
-function batchBtnStyle(bg, color, border) {
-  return {
-    border: `1px solid ${border}`, background: bg, color,
-    fontSize: '0.76rem', fontWeight: 700, cursor: 'pointer',
-  }
-}
+        add
